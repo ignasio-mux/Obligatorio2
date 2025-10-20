@@ -9,27 +9,79 @@
 #include "sr_arpcache.h"
 #include "sr_router.h"
 #include "sr_if.h"
+#include "sr_rt.h"
 #include "sr_protocol.h"
 #include "sr_utils.h"
 
 /*
 	Envía una solicitud ARP.
 */
-void sr_arp_request_send(struct sr_instance *sr, uint32_t ip) {
+void sr_arp_request_send(struct sr_instance* sr, uint32_t ip) {
 
+    printf("$$$ -> Send ARP request.\n");
+    struct sr_rt *rt = sr->routing_table;
+    struct sr_rt *match = NULL;
+    uint32_t max_mask = 0;
+    while (rt) {
+        if ((rt->dest.s_addr & rt->mask.s_addr) == (ip & rt->mask.s_addr)) {
+            uint32_t mask_val = ntohl(rt->mask.s_addr);
+            if (mask_val > max_mask) {
+                max_mask = mask_val;
+                match = rt;
+            }
+        }
+        rt = rt->next;
+    }
 
-  printf("$$$ -> Send ARP request.\n");
+    if (!match) {
+        fprintf(stderr, "No route found for ARP target IP\n");
+        return;
+    }
 
-  /* 
-  * COLOQUE AQÍ SU CÓDIGO
-  * SUGERENCIAS: 
-  * - Construya el cabezal Ethernet y agregue dirección de destino de broadcast
-  * - Envíe la solicitud ARP desde la interfaz conectada a la subred de la IP cuya MAC se desea conocer
-  * - Agregue la dirección de origen y el tipo de paquete
-  * - Construya el cabezal ARP y envíe el paquete
-  */
-  
-  printf("$$$ -> Send ARP request processing complete.\n");
+    /* Verificar si es una ruta directa (gw == 0.0.0.0) */
+    if (match->gw.s_addr != 0) {
+        fprintf(stderr, "ARP request for non-direct next-hop\n");
+        return;
+    }
+
+    /* Obtener la interfaz correspondiente */
+    struct sr_if *iface = sr_get_interface(sr, match->interface);
+    if (!iface) {
+        fprintf(stderr, "Interface not found for ARP request\n");
+        return;
+    }
+
+    /* Construir el paquete ARP */
+    unsigned int len = sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t);
+    uint8_t *buf = (uint8_t *)malloc(len);
+    if (!buf) {
+        fprintf(stderr, "Memory allocation failed for ARP packet\n");
+        return;
+    }
+
+    /* Cabezal Ethernet */
+    sr_ethernet_hdr_t *ehdr = (sr_ethernet_hdr_t *)buf;
+    memset(ehdr->ether_dhost, 0xff, ETHER_ADDR_LEN);  /* Broadcast */
+    memcpy(ehdr->ether_shost, iface->addr, ETHER_ADDR_LEN);
+    ehdr->ether_type = htons(ethertype_arp);
+
+    /* Cabezal ARP */
+    sr_arp_hdr_t *ahdr = (sr_arp_hdr_t *)(buf + sizeof(sr_ethernet_hdr_t));
+    ahdr->ar_hrd = htons(arp_hrd_ethernet);
+    ahdr->ar_pro = htons(ethertype_ip);
+    ahdr->ar_hln = ETHER_ADDR_LEN;
+    ahdr->ar_pln = 4;  /* Longitud de direcciÃ³n IP */
+    ahdr->ar_op = htons(arp_op_request);
+    memcpy(ahdr->ar_sha, iface->addr, ETHER_ADDR_LEN);
+    ahdr->ar_sip = iface->ip;
+    memset(ahdr->ar_tha, 0, ETHER_ADDR_LEN);  /* Ignorado en request, se pone a cero */
+    ahdr->ar_tip = ip;
+
+    /* Enviar el paquete */
+    sr_send_packet(sr, buf, len, iface->name);
+    free(buf);
+
+    printf("$$$ -> Send ARP request processing complete.\n");
 }
 
 /*
