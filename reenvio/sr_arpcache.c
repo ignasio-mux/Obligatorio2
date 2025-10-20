@@ -48,7 +48,7 @@ void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
     printf("$$$ -> Handling ARP request for IP: ");
     print_addr_ip_int(req->ip);
     
-    // Caso 1: Nunca se ha enviado la solicitud ARP
+    /* Caso 1: Nunca se ha enviado la solicitud ARP */
     if (req->sent == 0) {
         printf("$$$ -> First ARP request for this IP\n");
         sr_arp_request_send(sr, req->ip);
@@ -57,19 +57,20 @@ void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
         return;
     }
     
-    // Caso 2: Ya se envió, verificar si puedo reenviar
+    
+    /* Caso 2: Ya se envió, verificar si puedo reenviar */
     double time_since_last = difftime(now, req->sent);
     printf("$$$ -> Time since last send: %.1f seconds, Times sent: %d\n", 
            time_since_last, req->times_sent);
     
-    if (time_since_last >= 1.0) {  // Rate limiting: mínimo 1 segundo entre envíos
-        if (req->times_sent < 5) {  // Retry limit: máximo 5 intentos
+    if (time_since_last >= 1.0) { /* Rate limiting: mínimo 1 segundo entre envíos  */ 
+        if (req->times_sent < 5) { /* Retry limit: máximo 5 intentos */ 
             printf("$$$ -> Resending ARP request (attempt %d)\n", req->times_sent + 1);
             sr_arp_request_send(sr, req->ip);
             req->sent = now;
             req->times_sent++;
         } else {
-            // Excedí el límite de reintentos, host no alcanzable
+            /* // Excedí el límite de reintentos, host no alcanzable */
             printf("$$$ -> ARP request limit exceeded, sending Host Unreachable\n");
             host_unreachable(sr, req);
             sr_arpreq_destroy(&sr->cache, req);
@@ -82,6 +83,16 @@ void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
 /* Envía un mensaje ICMP host unreachable a los emisores de los paquetes esperando en la cola de una solicitud ARP */
 void host_unreachable(struct sr_instance *sr, struct sr_arpreq *req) {
     /* COLOQUE SU CÓDIGO AQUÍ */
+
+    struct sr_packet *paquete = req->packets;
+    while (paquete!= NULL){
+        uint8_t *ethernet_trama = paquete->buf;
+        uint8_t *ip_paquete = ethernet_trama + 14;
+        sr_ip_hdr_t *ip_hdr = (sr_ip_hdr_t *)ip_paquete;
+        uint32_t ip_destino = ip_hdr->ip_src;
+        sr_send_icmp_error_packet(3,1,sr,ip_destino,ip_paquete);
+        paquete = paquete->next;
+    }
 }
 
 /* NO DEBERÍA TENER QUE MODIFICAR EL CÓDIGO A PARTIR DE AQUÍ. */
