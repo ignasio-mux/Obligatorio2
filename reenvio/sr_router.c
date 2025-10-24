@@ -83,25 +83,114 @@ void sr_handle_ip_packet(struct sr_instance *sr,
 
 /* Gestiona la llegada de un paquete ARP*/
 void sr_handle_arp_packet(struct sr_instance *sr,
-        uint8_t *packet /* lent */,
-        unsigned int len,
-        uint8_t *srcAddr,
-        uint8_t *destAddr,
-        char *interface /* lent */,
-        sr_ethernet_hdr_t *eHdr) {
+                          uint8_t *packet /* prestado */,
+                          unsigned int len,
+                          uint8_t *srcAddr,
+                          uint8_t *destAddr,
+                          char *interface /* prestado */,
+                          sr_ethernet_hdr_t *eHdr)
+{
+    /* Verificar que la longitud del paquete sea suficiente para los encabezados Ethernet + ARP */
+    if (len < sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t)) {
+        printf("*** -> Paquete ARP demasiado corto, descartando.\n");
+        return;
+    }
 
-  /* Imprimo el cabezal ARP */
-  printf("*** -> It is an ARP packet. Print ARP header.\n");
-  print_hdr_arp(packet + sizeof(sr_ethernet_hdr_t));
+    /* Obtener el encabezado ARP */
+    sr_arp_hdr_t *arpHdr = (sr_arp_hdr_t *)(packet + sizeof(sr_ethernet_hdr_t));
 
-  /* COLOQUE SU CÓDIGO AQUÍ
-  
-  SUGERENCIAS:
-  - Verifique si se trata de un ARP request o ARP reply 
-  - Si es una ARP request, antes de responder verifique si el mensaje consulta por la dirección MAC asociada a una dirección IP configurada en una interfaz del router
-  - Si es una ARP reply, agregue el mapeo MAC->IP del emisor a la caché ARP y envíe los paquetes que hayan estado esperando por el ARP reply
-  
-  */
+    /* Verificar el formato del paquete ARP (tipo de hardware, protocolo, etc.) */
+    if (ntohs(arpHdr->ar_hrd) != 1 || /* Ethernet */
+        ntohs(arpHdr->ar_pro) != ethertype_ip || /* IP */
+        arpHdr->ar_hln != ETHER_ADDR_LEN || /* Longitud de MAC */
+        arpHdr->ar_pln != 4) { /* Longitud de IP */
+        printf("*** -> Formato de paquete ARP inválido, descartando.\n");
+        return;
+    }
+
+    /* Determinar si es una solicitud o respuesta ARP */
+    uint16_t arp_op = ntohs(arpHdr->ar_op);
+
+    if (arp_op == arp_op_request) {
+        /* Manejar solicitud ARP */
+        printf("*** -> Solicitud ARP recibida.\n");
+
+        /* Verificar si la solicitud es para una de nuestras interfaces */
+        struct sr_if *iface = sr_get_interface_given_ip(sr, arpHdr->ar_tip);
+        if (iface) {
+            /* La solicitud es para nuestra dirección MAC, enviar una respuesta ARP */
+            printf("*** -> Solicitud ARP para nuestra IP %s, enviando respuesta.\n", inet_ntoa(*(struct in_addr *)&arpHdr->ar_tip));
+
+            /* Asignar memoria para el paquete de respuesta ARP */
+            int arpPacketLen = sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t);
+            uint8_t *arpReply = (uint8_t *)malloc(arpPacketLen);
+            if (!arpReply) {
+                printf("*** -> Falló la asignación de memoria para la respuesta ARP.\n");
+                return;
+            }
+
+            /* Construir el encabezado Ethernet */
+            sr_ethernet_hdr_t *replyEthHdr = (sr_ethernet_hdr_t *)arpReply;
+            memcpy(replyEthHdr->ether_dhost, arpHdr->ar_sha, ETHER_ADDR_LEN); /* MAC del emisor */
+            memcpy(replyEthHdr->ether_shost, iface->addr, ETHER_ADDR_LEN); /* Nuestra MAC de interfaz */
+            replyEthHdr->ether_type = htons(ethertype_arp);
+
+            /* Construir el encabezado ARP */
+            sr_arp_hdr_t *replyArpHdr = (sr_arp_hdr_t *)(arpReply + sizeof(sr_ethernet_hdr_t));
+            replyArpHdr->ar_hrd = htons(1); /* Ethernet */
+            replyArpHdr->ar_pro = htons(ethertype_ip); /* IP */
+            replyArpHdr->ar_hln = ETHER_ADDR_LEN; /* Longitud de MAC */
+            replyArpHdr->ar_pln = 4; /* Longitud de IP */
+            replyArpHdr->ar_op = htons(arp_op_reply); /* Respuesta ARP */
+            memcpy(replyArpHdr->ar_sha, iface->addr, ETHER_ADDR_LEN); /* Nuestra MAC */
+            memcpy(replyArpHdr->ar_tha, arpHdr->ar_sha, ETHER_ADDR_LEN); /* MAC del emisor */
+            replyArpHdr->ar_sip = iface->ip; /* Nuestra IP */
+            replyArpHdr->ar_tip = arpHdr->ar_sip; /* IP del emisor */
+
+            /* Enviar la respuesta ARP */
+            print_hdr_arp((uint8_t *)replyArpHdr);
+            sr_send_packet(sr, arpReply, arpPacketLen, iface->name);
+            free(arpReply);
+        } else {
+            printf("*** -> Solicitud ARP no es para nuestra IP, ignorando.\n");
+        }
+    } else if (arp_op == arp_op_reply) {
+        /* Manejar respuesta ARP */
+        printf("*** -> Respuesta ARP recibida.\n");
+
+        /* Insertar el mapeo IP->MAC en la caché ARP */
+        struct sr_arpreq *req = sr_arpcache_insert(&sr->cache, arpHdr->ar_sha, arpHdr->ar_sip);
+        if (req) {
+            /* Enviar todos los paquetes pendientes que esperaban esta respuesta ARP */
+            struct sr_packet *currPacket = req->packets;
+            while (currPacket) {
+                sr_ethernet_hdr_t *pktEthHdr = (sr_ethernet_hdr_t *)currPacket->buf;
+                memcpy(pktEthHdr->ether_shost, sr_get_interface(sr, currPacket->iface)->addr, ETHER_ADDR_LEN);
+                memcpy(pktEthHdr->ether_dhost, arpHdr->ar_sha, ETHER_ADDR_LEN);
+
+                /* Crear una copia del paquete para enviar */
+                uint8_t *copyPacket = (uint8_t *)malloc(currPacket->len);
+                if (!copyPacket) {
+                    printf("*** -> Falló la asignación de memoria para la copia del paquete.\n");
+                    currPacket = currPacket->next;
+                    continue;
+                }
+                memcpy(copyPacket, currPacket->buf, currPacket->len);
+
+                /* Enviar el paquete */
+                print_hdrs(copyPacket, currPacket->len);
+                sr_send_packet(sr, copyPacket, currPacket->len, currPacket->iface);
+                free(copyPacket);
+
+                currPacket = currPacket->next;
+            }
+
+            /* Destruir la solicitud ARP ya que se recibió la respuesta */
+            sr_arpreq_destroy(&sr->cache, req);
+        }
+    } else {
+        printf("*** -> Operación ARP desconocida %d, descartando.\n", arp_op);
+    }
 }
 
 /* 
