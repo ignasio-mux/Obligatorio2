@@ -33,6 +33,9 @@ void sr_arp_request_send(struct sr_instance* sr, uint32_t ip) {
         rt = rt->next;
     }
 
+    /* En este caso hay que enviar un mensaje ICMP
+       Destination net unreachable (type 3, code 0) 
+    */
     if (!match) {
         fprintf(stderr, "No route found for ARP target IP\n");
         return;

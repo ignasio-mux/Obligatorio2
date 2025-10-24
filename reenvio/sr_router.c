@@ -81,6 +81,74 @@ void sr_handle_ip_packet(struct sr_instance *sr,
 
 }
 
+/* Envía una respuesta ARP */
+void sr_arp_reply_send(struct sr_instance *sr, uint32_t target_ip, uint8_t *target_mac, struct sr_if *iface) {
+    printf("* -> Sending ARP reply to IP: ");
+    print_addr_ip_int(target_ip);
+    printf("\n");
+    
+    /* Construir el paquete ARP reply */
+    unsigned int len = sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t);
+    uint8_t *buf = (uint8_t *)malloc(len);
+    if (!buf) {
+        fprintf(stderr, "Memory allocation failed for ARP reply packet\n");
+        return;
+    }
+    
+    /* Cabezal Ethernet */
+    sr_ethernet_hdr_t *ehdr = (sr_ethernet_hdr_t *)buf;
+    memcpy(ehdr->ether_dhost, target_mac, ETHER_ADDR_LEN);
+    memcpy(ehdr->ether_shost, iface->addr, ETHER_ADDR_LEN);
+    ehdr->ether_type = htons(ethertype_arp);
+    
+    /* Cabezal ARP */
+    sr_arp_hdr_t *ahdr = (sr_arp_hdr_t *)(buf + sizeof(sr_ethernet_hdr_t));
+    ahdr->ar_hrd = htons(arp_hrd_ethernet);
+    ahdr->ar_pro = htons(ethertype_ip);
+    ahdr->ar_hln = ETHER_ADDR_LEN;
+    ahdr->ar_pln = 4;  /* Longitud de dirección IP */
+    ahdr->ar_op = htons(arp_op_reply);
+    memcpy(ahdr->ar_sha, iface->addr, ETHER_ADDR_LEN);
+    ahdr->ar_sip = iface->ip;
+    memcpy(ahdr->ar_tha, target_mac, ETHER_ADDR_LEN);
+    ahdr->ar_tip = target_ip;
+    
+    /* Enviar el paquete */
+    sr_send_packet(sr, buf, len, iface->name);
+    free(buf);
+    
+    printf("* -> ARP reply sent successfully\n");
+}
+
+/* 
+* ***** A partir de aquí no debería tener que modificar nada ****
+*/
+
+/* Envía todos los paquetes IP pendientes de una solicitud ARP */
+void sr_arp_reply_send_pending_packets(struct sr_instance *sr,
+                                        struct sr_arpreq *arpReq,
+                                        uint8_t *dhost,
+                                        uint8_t *shost,
+                                        struct sr_if *iface) {
+
+  struct sr_packet *currPacket = arpReq->packets;
+  sr_ethernet_hdr_t *ethHdr;
+  uint8_t *copyPacket;
+
+  while (currPacket != NULL) {
+     ethHdr = (sr_ethernet_hdr_t *) currPacket->buf;
+     memcpy(ethHdr->ether_shost, shost, sizeof(uint8_t) * ETHER_ADDR_LEN);
+     memcpy(ethHdr->ether_dhost, dhost, sizeof(uint8_t) * ETHER_ADDR_LEN);
+
+     copyPacket = malloc(sizeof(uint8_t) * currPacket->len);
+     memcpy(copyPacket, ethHdr, sizeof(uint8_t) * currPacket->len);
+
+     print_hdrs(copyPacket, currPacket->len);
+     sr_send_packet(sr, copyPacket, currPacket->len, iface->name);
+     currPacket = currPacket->next;
+  }
+}
+
 /* Gestiona la llegada de un paquete ARP*/
 void sr_handle_arp_packet(struct sr_instance *sr,
         uint8_t *packet /* lent */,
@@ -102,36 +170,75 @@ void sr_handle_arp_packet(struct sr_instance *sr,
   - Si es una ARP reply, agregue el mapeo MAC->IP del emisor a la caché ARP y envíe los paquetes que hayan estado esperando por el ARP reply
   
   */
-}
 
-/* 
-* ***** A partir de aquí no debería tener que modificar nada ****
-*/
-
-/* Envía todos los paquetes IP pendientes de una solicitud ARP */
-void sr_arp_reply_send_pending_packets(struct sr_instance *sr,
-                                        struct sr_arpreq *arpReq,
-                                        uint8_t *dhost,
-                                        uint8_t *shost,
-                                        struct sr_if *iface) {
-
-  struct sr_packet *currPacket = arpReq->packets;
-  sr_ethernet_hdr_t *ethHdr;
-  uint8_t *copyPacket;
-
-  while (currPacket != NULL) {
-     ethHdr = (sr_ethernet_hdr_t *) currPacket->buf;
-     memcpy(ethHdr->ether_shost, dhost, sizeof(uint8_t) * ETHER_ADDR_LEN);
-     memcpy(ethHdr->ether_dhost, shost, sizeof(uint8_t) * ETHER_ADDR_LEN);
-
-     copyPacket = malloc(sizeof(uint8_t) * currPacket->len);
-     memcpy(copyPacket, ethHdr, sizeof(uint8_t) * currPacket->len);
-
-     print_hdrs(copyPacket, currPacket->len);
-     sr_send_packet(sr, copyPacket, currPacket->len, iface->name);
-     currPacket = currPacket->next;
+  /* Obtener el cabezal ARP */
+  sr_arp_hdr_t *arp_hdr = (sr_arp_hdr_t *)(packet + sizeof(sr_ethernet_hdr_t));
+  uint16_t arp_op = ntohs(arp_hdr->ar_op);
+  
+  printf("* -> ARP operation: %s\n", 
+         arp_op == arp_op_request ? "REQUEST" : 
+         arp_op == arp_op_reply ? "REPLY" : "UNKNOWN");
+  
+  if (arp_op == arp_op_request) {
+    printf("* -> Processing ARP REQUEST\n");
+    
+    /* Verificar si la solicitud es para una de nuestras interfaces */
+    struct sr_if *iface = sr_get_interface(sr, interface);
+    if (!iface) {
+      printf("* -> Interface not found: %s\n", interface);
+      return;
+    }
+    
+    /* Verificar si la IP solicitada coincide con alguna de nuestras interfaces */
+    struct sr_if *curr_iface = sr->if_list;
+    struct sr_if *target_iface = NULL;
+    
+    while (curr_iface) {
+      if (curr_iface->ip == arp_hdr->ar_tip) {
+        target_iface = curr_iface;
+        break;
+      }
+      curr_iface = curr_iface->next;
+    }
+    
+    if (target_iface) {
+      printf("* -> ARP request is for our IP: ");
+      print_addr_ip_int(arp_hdr->ar_tip);
+      printf("\n");
+      
+      /* Responder con ARP reply */
+      sr_arp_reply_send(sr, arp_hdr->ar_sip, arp_hdr->ar_sha, target_iface);
+    } else {
+      printf("* -> ARP request is not for us, ignoring\n");
+    }
+    
+  } else if (arp_op == arp_op_reply) {
+    printf("* -> Processing ARP REPLY\n");
+    
+    /* Agregar el mapeo IP->MAC a la caché ARP */
+    struct sr_arpreq *req = sr_arpcache_insert(&sr->cache, arp_hdr->ar_sha, arp_hdr->ar_sip);
+    
+    if (req) {
+      printf("* -> Found pending ARP request, sending queued packets\n");
+      
+      /* Obtener la interfaz por la que llegó el paquete */
+      struct sr_if *iface = sr_get_interface(sr, interface);
+      if (iface) {
+        /* Enviar todos los paquetes pendientes */
+        sr_arp_reply_send_pending_packets(sr, req, iface->addr, arp_hdr->ar_sha, iface);
+        
+        /* Limpiar la solicitud ARP */
+        sr_arpreq_destroy(&sr->cache, req);
+      }
+    } else {
+      printf("* -> No pending ARP request found for this IP\n");
+    }
+    
+  } else {
+    printf("* -> Unknown ARP operation: %d\n", arp_op);
   }
 }
+
 
 /*---------------------------------------------------------------------
  * Method: sr_handlepacket(uint8_t* p,char* interface)
