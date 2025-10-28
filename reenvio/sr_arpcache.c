@@ -13,17 +13,13 @@
 #include "sr_protocol.h"
 #include "sr_utils.h"
 
-/*
-	Envía una solicitud ARP.
-*/
-void sr_arp_request_send(struct sr_instance* sr, uint32_t ip) {
-
-    printf("$$$ -> Send ARP request.\n");
+struct sr_rt *sr_find_lpm_entry(struct sr_instance *sr, uint32_t ip_addr) {
+    /* Busco la mejor ruta para una IP usando Longest Prefix Match */
     struct sr_rt *rt = sr->routing_table;
     struct sr_rt *match = NULL;
     uint32_t max_mask = 0;
     while (rt) {
-        if ((rt->dest.s_addr & rt->mask.s_addr) == (ip & rt->mask.s_addr)) {
+        if ((rt->dest.s_addr & rt->mask.s_addr) == (ip_addr & rt->mask.s_addr)) {
             uint32_t mask_val = ntohl(rt->mask.s_addr);
             if (mask_val > max_mask) {
                 max_mask = mask_val;
@@ -32,31 +28,36 @@ void sr_arp_request_send(struct sr_instance* sr, uint32_t ip) {
         }
         rt = rt->next;
     }
+    return match;
+}
+
+/*
+	Envía una solicitud ARP.
+*/
+void sr_arp_request_send(struct sr_instance *sr, uint32_t ip, char* iface) {
+
+    struct sr_rt *match = sr_find_lpm_entry(sr,ip);
 
     /* En este caso hay que enviar un mensaje ICMP
        Destination net unreachable (type 3, code 0) 
     */
     if (!match) {
         fprintf(stderr, "No route found for ARP target IP\n");
-        return;
-    }
 
-    /* Verificar si es una ruta directa (gw == 0.0.0.0) */
-    if (match->gw.s_addr != 0) {
-        fprintf(stderr, "ARP request for non-direct next-hop\n");
+        /* sr_send_icmp_error_packet(3,0,sr,ip,ip_paquete); */
         return;
     }
 
     /* Obtener la interfaz correspondiente */
-    struct sr_if *iface = sr_get_interface(sr, match->interface);
-    if (!iface) {
+    struct sr_if *sr_iface = sr_get_interface(sr, match->interface); 
+    if (!sr_iface) {
         fprintf(stderr, "Interface not found for ARP request\n");
         return;
-    }
+    } 
 
     /* Construir el paquete ARP */
     unsigned int len = sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t);
-    uint8_t *buf = (uint8_t *)malloc(len);
+    uint8_t *buf = (uint8_t *) malloc(len);
     if (!buf) {
         fprintf(stderr, "Memory allocation failed for ARP packet\n");
         return;
@@ -65,7 +66,7 @@ void sr_arp_request_send(struct sr_instance* sr, uint32_t ip) {
     /* Cabezal Ethernet */
     sr_ethernet_hdr_t *ehdr = (sr_ethernet_hdr_t *)buf;
     memset(ehdr->ether_dhost, 0xff, ETHER_ADDR_LEN);  /* Broadcast */
-    memcpy(ehdr->ether_shost, iface->addr, ETHER_ADDR_LEN);
+    memcpy(ehdr->ether_shost, sr_iface->addr, ETHER_ADDR_LEN);
     ehdr->ether_type = htons(ethertype_arp);
 
     /* Cabezal ARP */
@@ -75,13 +76,13 @@ void sr_arp_request_send(struct sr_instance* sr, uint32_t ip) {
     ahdr->ar_hln = ETHER_ADDR_LEN;
     ahdr->ar_pln = 4;  /* Longitud de direcciÃ³n IP */
     ahdr->ar_op = htons(arp_op_request);
-    memcpy(ahdr->ar_sha, iface->addr, ETHER_ADDR_LEN);
-    ahdr->ar_sip = iface->ip;
+    memcpy(ahdr->ar_sha, sr_iface->addr, ETHER_ADDR_LEN);
+    ahdr->ar_sip = sr_iface->ip;
     memset(ahdr->ar_tha, 0, ETHER_ADDR_LEN);  /* Ignorado en request, se pone a cero */
     ahdr->ar_tip = ip;
 
     /* Enviar el paquete */
-    sr_send_packet(sr, buf, len, iface->name);
+    sr_send_packet(sr, buf, len, sr_iface->name);
     free(buf);
 
     printf("$$$ -> Send ARP request processing complete.\n");
@@ -102,11 +103,14 @@ void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
     
     printf("$$$ -> Handling ARP request for IP: ");
     print_addr_ip_int(req->ip);
-    
+
     /* Caso 1: Nunca se ha enviado la solicitud ARP */
     if (req->sent == 0) {
-        printf("$$$ -> First ARP request for this IP\n");
-        sr_arp_request_send(sr, req->ip);
+        printf("$$$ -> First ARP request for this IP: ");
+        print_addr_ip_int(req->ip);
+        printf("$$$ -> Interface for this IP: "); 
+        printf("%s\n",req->iface);
+        sr_arp_request_send(sr, req->ip, req->iface);
         req->sent = now;
         req->times_sent = 1;
         return;
@@ -121,7 +125,7 @@ void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
     if (time_since_last >= 1.0) { /* Rate limiting: mínimo 1 segundo entre envíos  */ 
         if (req->times_sent < 5) { /* Retry limit: máximo 5 intentos */ 
             printf("$$$ -> Resending ARP request (attempt %d)\n", req->times_sent + 1);
-            sr_arp_request_send(sr, req->ip);
+            sr_arp_request_send(sr, req->ip, req->iface);
             req->sent = now;
             req->times_sent++;
         } else {
@@ -142,7 +146,7 @@ void host_unreachable(struct sr_instance *sr, struct sr_arpreq *req) {
     struct sr_packet *paquete = req->packets;
     while (paquete!= NULL){
         uint8_t *ethernet_trama = paquete->buf;
-        uint8_t *ip_paquete = ethernet_trama + 14;
+        uint8_t *ip_paquete = ethernet_trama + sizeof(sr_ethernet_hdr_t);
         sr_ip_hdr_t *ip_hdr = (sr_ip_hdr_t *)ip_paquete;
         uint32_t ip_destino = ip_hdr->ip_src;
         sr_send_icmp_error_packet(3,1,sr,ip_destino,ip_paquete);
@@ -215,12 +219,12 @@ struct sr_arpreq *sr_arpcache_queuereq(struct sr_arpcache *cache,
             break;
         }
     }
-    
     /* If the IP wasn't found, add it */
     if (!req) {
         req = (struct sr_arpreq *) calloc(1, sizeof(struct sr_arpreq));
         req->ip = ip;
         req->next = cache->requests;
+        req->iface = iface;
         cache->requests = req;
     }
     
@@ -236,9 +240,7 @@ struct sr_arpreq *sr_arpcache_queuereq(struct sr_arpcache *cache,
         new_pkt->next = req->packets;
         req->packets = new_pkt;
     }
-    
     pthread_mutex_unlock(&(cache->lock));
-    
     return req;
 }
 

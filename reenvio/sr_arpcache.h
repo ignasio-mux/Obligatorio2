@@ -66,6 +66,7 @@ struct sr_arpreq {
     uint32_t times_sent;        /* Number of times this request was sent. You 
                                    should update this. */
     struct sr_packet *packets;  /* List of pkts waiting on this req to finish */
+    char *iface;                /* Interfaz por la que se envía la ARP request */
     struct sr_arpreq *next;
 };
 
