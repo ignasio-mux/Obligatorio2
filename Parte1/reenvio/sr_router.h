@@ -73,7 +73,6 @@ void sr_send_icmp_error_packet(uint8_t, uint8_t, struct sr_instance*, uint32_t, 
 struct sr_rt* sr_lpm_lookup(struct sr_instance*, uint32_t);
 int is_packet_for_me(struct sr_instance*, uint32_t);
 void sr_send_icmp_echo_reply(struct sr_instance*, uint8_t*, unsigned int, char*);
-void sr_arp_request_send(struct sr_instance*, uint32_t);
 
 /* -- sr_if.c -- */
 void sr_add_interface(struct sr_instance* , const char* );
