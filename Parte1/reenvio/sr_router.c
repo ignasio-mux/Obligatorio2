@@ -252,8 +252,6 @@ void sr_handle_ip_packet(struct sr_instance *sr,
         /* Verificar si es un ICMP echo request */
         if (ip_hdr->ip_p == ip_protocol_icmp) {
             sr_icmp_hdr_t *icmp_hdr = (sr_icmp_hdr_t *)(packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t));
-            
-            printf("Hola: \n");print_hdr_icmp(packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t)); printf("Hola: \n");
             if (icmp_hdr->icmp_type == 8 && icmp_hdr->icmp_code == 0) { /* Echo request */
                 printf("*** -> ICMP echo request received, sending echo reply\n");
                 uint8_t *ipPacket = (packet + sizeof(sr_ethernet_hdr_t));

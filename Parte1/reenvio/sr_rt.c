@@ -176,3 +176,21 @@ void sr_print_routing_entry(struct sr_rt* entry)
     printf("%s\n",entry->interface);
 
 } /* -- sr_print_routing_entry -- */
+
+struct sr_rt *sr_find_lpm_entry(struct sr_instance *sr, uint32_t ip_addr) {
+    /* Busco la mejor ruta para una IP usando Longest Prefix Match */
+    struct sr_rt *rt = sr->routing_table;
+    struct sr_rt *match = NULL;
+    uint32_t max_mask = 0;
+    while (rt) {
+        if ((rt->dest.s_addr & rt->mask.s_addr) == (ip_addr & rt->mask.s_addr)) {
+            uint32_t mask_val = ntohl(rt->mask.s_addr);
+            if (mask_val > max_mask) {
+                max_mask = mask_val;
+                match = rt;
+            }
+        }
+        rt = rt->next;
+    }
+    return match;
+}
