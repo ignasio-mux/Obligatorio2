@@ -36,7 +36,7 @@ typedef struct sr_rip_entry_t { /* Entrada RIP V2 - ver sec 4.0 RFC 2453 */
     uint32_t mask;
     uint32_t next_hop;
     uint32_t metric;
-} __attribute__ ((packed)) sr_rip_entry_t;
+} __attribute__ ((packed));
 
 typedef struct sr_rip_packet_t { /* Paquete RIP */
     uint8_t command; /* Tipo de mensaje RIP */
@@ -46,6 +46,7 @@ typedef struct sr_rip_packet_t { /* Paquete RIP */
 
 } __attribute__ ((packed)) sr_rip_packet_t;
 
+struct sr_rt* sr_find_learned_route (sr_rt* head, uint32_t dest_ip, uint32_t dest_mask);
 void sr_handle_rip_packet(struct sr_instance* sr, const uint8_t* packet, unsigned int pkt_len, unsigned int ip_off, unsigned int rip_off, unsigned int rip_len, const char* in_ifname);
 void* sr_rip_send_requests(void* arg);
 void sr_rip_send_response(struct sr_instance* sr, struct sr_if* interface, uint32_t ipDst);

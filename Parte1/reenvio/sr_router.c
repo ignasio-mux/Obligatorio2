@@ -210,26 +210,6 @@ void sr_send_icmp_error_packet(uint8_t type,
     }
 }
 
-/* Busca la mejor ruta para una IP usando Longest Prefix Match */
-struct sr_rt* sr_lpm_lookup(struct sr_instance *sr, uint32_t ip_addr) {
-    struct sr_rt *rt = sr->routing_table;
-    struct sr_rt *best_match = NULL;
-    uint32_t best_mask = 0;
-    
-    while (rt) {
-        if ((rt->dest.s_addr & rt->mask.s_addr) == (ip_addr & rt->mask.s_addr)) {
-            uint32_t mask_val = ntohl(rt->mask.s_addr);
-            if (mask_val > best_mask) {
-                best_mask = mask_val;
-                best_match = rt;
-            }
-        }
-        rt = rt->next;
-    }
-    
-    return best_match;
-}
-
 /* Verifica si una IP pertenece a alguna de nuestras interfaces */
 int is_packet_for_me(struct sr_instance *sr, uint32_t ip) {
     struct sr_if *iface = sr->if_list;
@@ -242,46 +222,6 @@ int is_packet_for_me(struct sr_instance *sr, uint32_t ip) {
     }
     
     return 0;
-}
-
-/* Envía una respuesta ICMP echo reply */
-void sr_send_icmp_echo_reply(struct sr_instance *sr, uint8_t *packet, unsigned int len, char *interface) {
-    printf("*** -> Sending ICMP echo reply\n");
-    
-    /* Obtener cabezales */
-    sr_ethernet_hdr_t *eth_hdr = (sr_ethernet_hdr_t *)packet;
-    sr_ip_hdr_t *ip_hdr = (sr_ip_hdr_t *)(packet + sizeof(sr_ethernet_hdr_t));
-    
-    /* Crear una copia del paquete */
-    uint8_t *reply_packet = malloc(len);
-    memcpy(reply_packet, packet, len);
-    
-    /* Actualizar cabezal Ethernet */
-    sr_ethernet_hdr_t *reply_eth = (sr_ethernet_hdr_t *)reply_packet;
-    memcpy(reply_eth->ether_dhost, eth_hdr->ether_shost, ETHER_ADDR_LEN);
-    memcpy(reply_eth->ether_shost, eth_hdr->ether_dhost, ETHER_ADDR_LEN);
-    
-    /* Actualizar cabezal IP */
-    sr_ip_hdr_t *reply_ip = (sr_ip_hdr_t *)(reply_packet + sizeof(sr_ethernet_hdr_t));
-    reply_ip->ip_src = ip_hdr->ip_dst;
-    reply_ip->ip_dst = ip_hdr->ip_src;
-    reply_ip->ip_sum = 0; /* Se recalculará */
-    
-    /* Actualizar cabezal ICMP */
-    sr_icmp_hdr_t *reply_icmp = (sr_icmp_hdr_t *)(reply_packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t));
-    reply_icmp->icmp_type = 0; /* Echo reply */
-    reply_icmp->icmp_code = 0;
-    reply_icmp->icmp_sum = 0; /* Se recalculará */
-    
-    /* Recalcular checksums */
-    reply_ip->ip_sum = ip_cksum(reply_ip, sizeof(sr_ip_hdr_t));
-    reply_icmp->icmp_sum = icmp_cksum(reply_icmp, len - sizeof(sr_ethernet_hdr_t) - sizeof(sr_ip_hdr_t));
-    
-    /* Enviar el paquete */
-    sr_send_packet(sr, reply_packet, len, interface);
-    free(reply_packet);
-    
-    printf("*** -> ICMP echo reply sent\n");
 }
 
 void sr_handle_ip_packet(struct sr_instance *sr,
@@ -316,7 +256,6 @@ void sr_handle_ip_packet(struct sr_instance *sr,
             printf("Hola: \n");print_hdr_icmp(packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t)); printf("Hola: \n");
             if (icmp_hdr->icmp_type == 8 && icmp_hdr->icmp_code == 0) { /* Echo request */
                 printf("*** -> ICMP echo request received, sending echo reply\n");
-                /* sr_send_icmp_echo_reply(sr, packet, len, interface); */
                 uint8_t *ipPacket = (packet + sizeof(sr_ethernet_hdr_t));
                 sr_send_icmp_error_packet(0,0,sr,src_ip,ipPacket);
                 printf("*** -> ICMP echo reply sending true\n");
@@ -336,7 +275,7 @@ void sr_handle_ip_packet(struct sr_instance *sr,
     }
     
     /* Buscar en la tabla de enrutamiento */
-    struct sr_rt *route = sr_lpm_lookup(sr, dest_ip);
+    struct sr_rt *route = sr_find_lpm_entry(sr, dest_ip);
     if (!route) {
         printf("*** -> No route found, sending ICMP net unreachable\n");
         sr_send_icmp_error_packet(3, 0, sr, src_ip, packet + sizeof(sr_ethernet_hdr_t));

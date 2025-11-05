@@ -76,6 +76,7 @@ int sr_read_from_server(struct sr_instance* );
 void sr_init(struct sr_instance* );
 void sr_handlepacket(struct sr_instance* , uint8_t * , unsigned int , char* );
 void sr_handle_arp_packet(struct sr_instance*, uint8_t *, unsigned int, uint8_t *, uint8_t *, char *, sr_ethernet_hdr_t *);
+int is_packet_for_me(struct sr_instance*, uint32_t);
 void sr_handle_ip_packet(struct sr_instance*, uint8_t *, unsigned int, uint8_t *, uint8_t *, char *, sr_ethernet_hdr_t *);
 void sr_send_icmp_error_packet(uint8_t, uint8_t, struct sr_instance*, uint32_t, uint8_t*);
 

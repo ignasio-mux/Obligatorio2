@@ -13,24 +13,6 @@
 #include "sr_protocol.h"
 #include "sr_utils.h"
 
-struct sr_rt *sr_find_lpm_entry(struct sr_instance *sr, uint32_t ip_addr) {
-    /* Busco la mejor ruta para una IP usando Longest Prefix Match */
-    struct sr_rt *rt = sr->routing_table;
-    struct sr_rt *match = NULL;
-    uint32_t max_mask = 0;
-    while (rt) {
-        if ((rt->dest.s_addr & rt->mask.s_addr) == (ip_addr & rt->mask.s_addr)) {
-            uint32_t mask_val = ntohl(rt->mask.s_addr);
-            if (mask_val > max_mask) {
-                max_mask = mask_val;
-                match = rt;
-            }
-        }
-        rt = rt->next;
-    }
-    return match;
-}
-
 /*
 	Envía una solicitud ARP.
 */
@@ -43,7 +25,6 @@ void sr_arp_request_send(struct sr_instance *sr, uint32_t ip, char* iface) {
     */
     if (!match) {
         fprintf(stderr, "No route found for ARP target IP\n");
-
         /* sr_send_icmp_error_packet(3,0,sr,ip,ip_paquete); */
         return;
     }

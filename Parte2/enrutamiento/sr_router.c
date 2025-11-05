@@ -50,7 +50,27 @@ void sr_init(struct sr_instance* sr)
     /* Hilo para gestionar el timeout del caché ARP */
     pthread_create(&thread, &(sr->attr), sr_arpcache_timeout, sr);
 
+    /* Al encender su router, debe enviar una request RIP por cada una de sus 
+       interfaces para poder poblar lo antes posible la tabla de enrutamiento.
+       Se envia un Request RIP por cada interfaz.  
+    */
+    sr_rip_send_requests(sr);
+
 } /* -- sr_init -- */
+
+/* Verifica si una IP pertenece a alguna de nuestras interfaces */
+int is_packet_for_me(struct sr_instance *sr, uint32_t ip) {
+    struct sr_if *iface = sr->if_list;
+    
+    while (iface) {
+        if (iface->ip == ip) {
+            return 1;
+        }
+        iface = iface->next;
+    }
+    
+    return 0;
+}
 
 /* Envía un paquete ICMP de error */
 void sr_send_icmp_error_packet(uint8_t type,
@@ -262,14 +282,22 @@ void sr_handle_ip_packet(struct sr_instance *sr,
             printf("Hola: \n");print_hdr_icmp(packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t)); printf("Hola: \n");
             if (icmp_hdr->icmp_type == 8 && icmp_hdr->icmp_code == 0) { /* Echo request */
                 printf("*** -> ICMP echo request received, sending echo reply\n");
-                /* sr_send_icmp_echo_reply(sr, packet, len, interface); */
                 uint8_t *ipPacket = (packet + sizeof(sr_ethernet_hdr_t));
                 sr_send_icmp_error_packet(0,0,sr,src_ip,ipPacket);
                 printf("*** -> ICMP echo reply sending true\n");
                 return;
             }
         } 
-        
+            
+        if (ip_hdr->ip_p == ip_protocol_udp) {
+            sr_udp_hdr_t* udp_hdr = (sr_udp_hdr_t*)(packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t));
+            if (udp_hdr->dst_port == RIP_PORT)
+                unsigned int ip_off = sizeof(sr_ethernet_hdr_t);
+                unsigned int rip_off = ip_off + sizeof(sr_ip_hdr_t) + sizeof(sr_udp_hdr_t) ;
+                unsigned int rip_len = len - rip_off;
+                sr_handle_rip_packet(sr, packet, len, ip_off, rip_off, rip_len, interface)
+        }
+                
         if (ip_hdr->ip_p == ip_protocol_udp || ip_hdr->ip_p == ip_protocol_tcp) {
             printf("$$$ -> Received UDP/TCP for router, sending ICMP Port Unreachable\n");
             uint8_t *ipPacket = (packet + sizeof(sr_ethernet_hdr_t));
@@ -280,9 +308,13 @@ void sr_handle_ip_packet(struct sr_instance *sr,
         printf("*** -> Not an ICMP echo request, dropping packet\n");
         return;
     }
-    
+
+    if (dest_ip == htonl(RIP_IP) && udp_hdr->dst_port == RIP_PORT) {
+        sr_handle_rip_packet(sr, packet, len, ip_off, rip_off, rip_len, interface)
+    }
+
     /* Buscar en la tabla de enrutamiento */
-    struct sr_rt *route = sr_lpm_lookup(sr, dest_ip);
+    struct sr_rt *route = sr_find_lpm_entry(sr, dest_ip);
     if (!route) {
         printf("*** -> No route found, sending ICMP net unreachable\n");
         sr_send_icmp_error_packet(3, 0, sr, src_ip, packet + sizeof(sr_ethernet_hdr_t));
