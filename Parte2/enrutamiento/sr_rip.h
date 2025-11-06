@@ -54,5 +54,6 @@ void* sr_rip_timeout_manager(void* arg);
 int sr_rip_init(struct sr_instance* sr);
 int sr_rip_update_route(struct sr_instance* sr, const struct sr_rip_entry_t* rte, uint32_t src_ip, const char* in_ifname);
 int sr_rip_validate_packet(struct sr_rip_packet_t* packet, unsigned int len);
+void sr_rip_send_triggered_update(struct sr_instance* sr);
 
 #endif /* SR_RIP_H */

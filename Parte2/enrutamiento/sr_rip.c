@@ -424,6 +424,21 @@ void* sr_rip_periodic_advertisement(void* arg) {
     return NULL;
 }
 
+/* Envía una actualización triggered (inmediata) cuando hay cambios en la tabla de enrutamiento */
+void sr_rip_send_triggered_update(struct sr_instance* sr) {
+    /* Recorrer todas las interfaces y enviar una respuesta RIP por cada una */
+    struct sr_if* interface = sr->if_list;
+    
+    while (interface != NULL) {
+        /* Enviar respuesta RIP por multicast (RIP_IP) a través de esta interfaz */
+        /* RIP_IP está definido como 0xE0000009 en host byte order */
+        /* Convertir a network byte order para pasarlo a sr_rip_send_response */
+        sr_rip_send_response(sr, interface, htonl(RIP_IP));
+        
+        interface = interface->next;
+    }
+}
+
 /* Chequea las rutas y marca las que expiran por timeout */
 void* sr_rip_timeout_manager(void* arg) {
     struct sr_instance* sr = arg;
