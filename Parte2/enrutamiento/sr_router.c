@@ -362,6 +362,13 @@ void sr_handle_ip_packet(struct sr_instance *sr,
     }
 }
 
+/* Declaración forward */
+void sr_arp_reply_send_pending_packets(struct sr_instance *sr,
+                                        struct sr_arpreq *arpReq,
+                                        uint8_t *dhost,
+                                        uint8_t *shost,
+                                        struct sr_if *iface);
+
 /* Gestiona la llegada de un paquete ARP*/
 void sr_handle_arp_packet(struct sr_instance *sr,
         uint8_t *packet /* lent */,
