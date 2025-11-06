@@ -265,25 +265,79 @@ void* sr_rip_send_requests(void* arg) {
     sleep(3); // Esperar a que se inicialice todo
     struct sr_instance* sr = arg;
     struct sr_if* interface = sr->if_list;
+    
     // Se envia un Request RIP por cada interfaz:
+    while (interface != NULL) {
+        /* Calcular longitudes del paquete */
+        unsigned int rip_entry_size = sizeof(sr_rip_entry_t);
+        unsigned int rip_packet_size = sizeof(sr_rip_packet_t) + rip_entry_size;
+        unsigned int udp_len = sizeof(sr_udp_hdr_t) + rip_packet_size;
+        unsigned int ip_len = sizeof(sr_ip_hdr_t) + udp_len;
+        unsigned int total_len = sizeof(sr_ethernet_hdr_t) + ip_len;
+        
         /* Reservar buffer para paquete completo con cabecera Ethernet */
+        uint8_t* packet = (uint8_t*)malloc(total_len);
+        if (!packet) {
+            printf("RIP: Error allocating memory for request packet\n");
+            interface = interface->next;
+            continue;
+        }
+        memset(packet, 0, total_len);
         
         /* Construir cabecera Ethernet */
+        sr_ethernet_hdr_t* eth_hdr = (sr_ethernet_hdr_t*)packet;
+        memcpy(eth_hdr->ether_shost, interface->addr, ETHER_ADDR_LEN);
+        memcpy(eth_hdr->ether_dhost, rip_multicast_mac, ETHER_ADDR_LEN);
+        eth_hdr->ether_type = htons(ethertype_ip);
         
         /* Construir cabecera IP */
-            /* RIP usa TTL=1 */
+        sr_ip_hdr_t* ip_hdr = (sr_ip_hdr_t*)(packet + sizeof(sr_ethernet_hdr_t));
+        ip_hdr->ip_v = 4;
+        ip_hdr->ip_hl = 5; /* 5 palabras de 32 bits = 20 bytes */
+        ip_hdr->ip_tos = 0;
+        ip_hdr->ip_len = htons(ip_len);
+        ip_hdr->ip_id = htons(0);
+        ip_hdr->ip_off = 0;
+        ip_hdr->ip_ttl = 1; /* RIP usa TTL=1 */
+        ip_hdr->ip_p = ip_protocol_udp;
+        ip_hdr->ip_sum = 0; /* Se calculará después */
+        ip_hdr->ip_src = interface->ip;
+        ip_hdr->ip_dst = htonl(RIP_IP); /* 224.0.0.9 */
         
         /* Construir cabecera UDP */
+        sr_udp_hdr_t* udp_hdr = (sr_udp_hdr_t*)(packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t));
+        udp_hdr->src_port = htons(RIP_PORT);
+        udp_hdr->dst_port = htons(RIP_PORT);
+        udp_hdr->length = htons(udp_len);
+        udp_hdr->checksum = 0; /* Se calculará después */
         
         /* Construir paquete RIP */
-
-        /* Entrada para solicitar la tabla de ruteo completa (ver RFC) */
-
-        /* Calcular longitudes del paquete */
+        sr_rip_packet_t* rip_packet = (sr_rip_packet_t*)(packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t) + sizeof(sr_udp_hdr_t));
+        rip_packet->command = RIP_COMMAND_REQUEST;
+        rip_packet->version = RIP_VERSION;
+        rip_packet->zero = 0;
+        
+        /* Entrada para solicitar la tabla de ruteo completa (ver RFC 2453) */
+        /* Una entrada con family_identifier=0 indica solicitud de toda la tabla */
+        sr_rip_entry_t* rip_entry = (sr_rip_entry_t*)(rip_packet->entries);
+        rip_entry->family_identifier = 0; /* Solicita toda la tabla */
+        rip_entry->route_tag = 0;
+        rip_entry->ip = 0;
+        rip_entry->mask = 0;
+        rip_entry->next_hop = 0;
+        rip_entry->metric = htonl(INFINITY); /* Debe ser 16 (INFINITY) según RFC */
         
         /* Calcular checksums */
+        ip_hdr->ip_sum = ip_cksum(ip_hdr, sizeof(sr_ip_hdr_t));
+        udp_hdr->checksum = udp_cksum(ip_hdr, udp_hdr, (uint8_t*)rip_packet);
         
         /* Enviar paquete */
+        Debug("RIP: Sending request packet on interface %s\n", interface->name);
+        sr_send_packet(sr, packet, total_len, interface->name);
+        free(packet);
+        
+        interface = interface->next;
+    }
         
     return NULL;
 }
@@ -370,21 +424,65 @@ void* sr_rip_periodic_advertisement(void* arg) {
     return NULL;
 }
 
-
 /* Chequea las rutas y marca las que expiran por timeout */
 void* sr_rip_timeout_manager(void* arg) {
     struct sr_instance* sr = arg;
     
-    /*  - Bucle periódico que espera 1 segundo entre comprobaciones.
-        - Recorre la tabla de enrutamiento y para cada ruta dinámica (aprendida de un vecino) que no se haya actualizado
-        en el intervalo de timeout (RIP_TIMEOUT_SEC), marca la ruta como inválida, fija su métrica a
-        INFINITY y anota el tiempo de inicio del proceso de garbage collection.
-        - Si se detectan cambios, se desencadena una actualización (triggered update)
-        hacia los vecinos y se actualiza/visualiza la tabla de enrutamiento.
-        - Imprimir la tabla si hay cambios
-        - Se debe usar el mutex rip_metadata_lock para proteger el acceso concurrente
-          a la tabla de enrutamiento.
-    */
+    /* Bucle periódico que espera 1 segundo entre comprobaciones */
+    while (1) {
+        sleep(1);
+        
+        time_t current_time = time(NULL);
+        int changes_detected = 0;
+        
+        /* Proteger el acceso concurrente a la tabla de enrutamiento */
+        pthread_mutex_lock(&rip_metadata_lock);
+        
+        /* Recorre la tabla de enrutamiento */
+        struct sr_rt* rt = sr->routing_table;
+        while (rt != NULL) {
+            /* Verificar si es una ruta dinámica (aprendida de un vecino) */
+            /* learned_from != 0 indica que fue aprendida de un vecino */
+            if (rt->learned_from != 0 && rt->valid == 1) {
+                /* Calcular el tiempo transcurrido desde la última actualización */
+                double time_elapsed = difftime(current_time, rt->last_updated);
+                
+                /* Si no se ha actualizado en el intervalo de timeout */
+                if (time_elapsed >= RIP_TIMEOUT_SEC) {
+                    Debug("RIP: Route timeout detected for ");
+                    Debug("%s/%s\n", inet_ntoa(rt->dest), inet_ntoa(rt->mask));
+                    
+                    /* Marcar la ruta como inválida */
+                    rt->valid = 0;
+                    
+                    /* Fijar su métrica a INFINITY */
+                    rt->metric = INFINITY;
+                    
+                    /* Anotar el tiempo de inicio del proceso de garbage collection */
+                    rt->garbage_collection_time = current_time;
+                    
+                    changes_detected = 1;
+                }
+            }
+            
+            rt = rt->next;
+        }
+        
+        pthread_mutex_unlock(&rip_metadata_lock);
+        
+        /* Si se detectaron cambios, desencadenar una actualización (triggered update) */
+        if (changes_detected) {
+            Debug("RIP: Timeout changes detected, sending triggered update\n");
+            sr_rip_send_triggered_update(sr);
+            
+            /* Actualizar/visualizar la tabla de enrutamiento */
+            pthread_mutex_lock(&rip_metadata_lock);
+            Debug("\n-> RIP: Printing the forwarding table after timeout\n");
+            print_routing_table(sr);
+            pthread_mutex_unlock(&rip_metadata_lock);
+        }
+    }
+    
     return NULL;
 }
 
@@ -493,4 +591,3 @@ int sr_rip_init(struct sr_instance* sr) {
 
     return 0;
 }
-
