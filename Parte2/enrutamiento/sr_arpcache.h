@@ -78,7 +78,6 @@ struct sr_arpcache {
 };
 
 void sr_arpcache_sweepreqs(struct sr_instance *sr);
-void sr_arp_request_send(struct sr_instance *sr, uint32_t ip, char* iface);
 void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req);
 void host_unreachable(struct sr_instance *sr, struct sr_arpreq *req);
 

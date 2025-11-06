@@ -36,7 +36,7 @@ typedef struct sr_rip_entry_t { /* Entrada RIP V2 - ver sec 4.0 RFC 2453 */
     uint32_t mask;
     uint32_t next_hop;
     uint32_t metric;
-} __attribute__ ((packed));
+} __attribute__ ((packed)) sr_rip_entry_t;
 
 typedef struct sr_rip_packet_t { /* Paquete RIP */
     uint8_t command; /* Tipo de mensaje RIP */
@@ -46,7 +46,6 @@ typedef struct sr_rip_packet_t { /* Paquete RIP */
 
 } __attribute__ ((packed)) sr_rip_packet_t;
 
-struct sr_rt* sr_find_learned_route (sr_rt* head, uint32_t dest_ip, uint32_t dest_mask);
 void sr_handle_rip_packet(struct sr_instance* sr, const uint8_t* packet, unsigned int pkt_len, unsigned int ip_off, unsigned int rip_off, unsigned int rip_len, const char* in_ifname);
 void* sr_rip_send_requests(void* arg);
 void sr_rip_send_response(struct sr_instance* sr, struct sr_if* interface, uint32_t ipDst);
@@ -55,7 +54,5 @@ void* sr_rip_timeout_manager(void* arg);
 int sr_rip_init(struct sr_instance* sr);
 int sr_rip_update_route(struct sr_instance* sr, const struct sr_rip_entry_t* rte, uint32_t src_ip, const char* in_ifname);
 int sr_rip_validate_packet(struct sr_rip_packet_t* packet, unsigned int len);
-void sr_rip_construct_response(struct sr_instance* sr, struct sr_if* interface, struct sr_rip_packet_t* packet, int* entry_count);
-void sr_rip_send_triggered_update(struct sr_instance* sr);
 
 #endif /* SR_RIP_H */

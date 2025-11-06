@@ -11,60 +11,19 @@
 #include "sr_if.h"
 #include "sr_protocol.h"
 #include "sr_utils.h"
-
-struct sr_rt *sr_find_lpm_entry(struct sr_instance *sr, uint32_t ip_addr) {
-    /* Busco la mejor ruta para una IP usando Longest Prefix Match */
-    struct sr_rt *rt = sr->routing_table;
-    struct sr_rt *match = NULL;
-    uint32_t max_mask = 0;
-    while (rt) {
-        if ((rt->dest.s_addr & rt->mask.s_addr) == (ip_addr & rt->mask.s_addr)) {
-            uint32_t mask_val = ntohl(rt->mask.s_addr);
-            if (mask_val > max_mask) {
-                max_mask = mask_val;
-                match = rt;
-            }
-        }
-        rt = rt->next;
-    }
-    return match;
-}
+#include "sr_rt.h"
 
 /*
-	Envía una solicitud ARP.
+    Envía una solicitud ARP.
 */
 void sr_arp_request_send(struct sr_instance *sr, uint32_t ip, char* iface) {
-
-
-  printf("$$$ -> Send ARP request.\n");
-
-  /* 
-  * COLOQUE AQÍ SU CÓDIGO
-  * SUGERENCIAS: 
-  * - Construya el cabezal Ethernet y agregue dirección de destino de broadcast
-  * - Envíe la solicitud ARP desde la interfaz pasada por parámetro, correspondiente a la conectada a la subred de la IP cuya MAC se desea conocer
-  * - Agregue la dirección de origen y el tipo de paquete
-  * - Construya el cabezal ARP y envíe el paquete
-  */
-
-      struct sr_rt *match = sr_find_lpm_entry(sr,ip);
-
-    /* En este caso hay que enviar un mensaje ICMP
-       Destination net unreachable (type 3, code 0) 
-    */
-    if (!match) {
-        fprintf(stderr, "No route found for ARP target IP\n");
-
-        /* sr_send_icmp_error_packet(3,0,sr,ip,ip_paquete); */
-        return;
-    }
-
+    
     /* Obtener la interfaz correspondiente */
-    struct sr_if *sr_iface = sr_get_interface(sr, match->interface); 
+    struct sr_if *sr_iface = sr_get_interface(sr, iface);
     if (!sr_iface) {
         fprintf(stderr, "Interface not found for ARP request\n");
         return;
-    } 
+    }
 
     /* Construir el paquete ARP */
     unsigned int len = sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t);
@@ -99,21 +58,20 @@ void sr_arp_request_send(struct sr_instance *sr, uint32_t ip, char* iface) {
     printf("$$$ -> Send ARP request processing complete.\n");
 }
 
+
 /*
   Para cada solicitud enviada, se verifica si se debe enviar otra solicitud o descartar la solicitud ARP.
   Si pasó más de un segundo desde que se envió la última solicitud, se envía otra, siempre y cuando no se haya enviado más de cinco veces.
   Si se envió más de 5 veces, se debe descartar la solicitud ARP y enviar un ICMP host unreachable.
-  
+ 
   SUGERENCIAS:
   - la cola de solicitudes ARP se encuentra en sr->cache.requests, investigue la estructura y sus campos, junto a sus estructuras cuando corresponda
   - investigue el uso de tipos de datos de tiempo y sus funciones asociadas en C
   - no olvide actualizar los campos de la solicitud luego de reenviarla
 */
 void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
-    /* COLOQUE SU CÓDIGO AQUÍ */
-
     time_t now = time(NULL);
-    
+   
     printf("$$$ -> Handling ARP request for IP: ");
     print_addr_ip_int(req->ip);
 
@@ -121,22 +79,21 @@ void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
     if (req->sent == 0) {
         printf("$$$ -> First ARP request for this IP: ");
         print_addr_ip_int(req->ip);
-        printf("$$$ -> Interface for this IP: "); 
+        printf("$$$ -> Interface for this IP: ");
         printf("%s\n",req->iface);
         sr_arp_request_send(sr, req->ip, req->iface);
         req->sent = now;
         req->times_sent = 1;
         return;
     }
-    
-    
+   
     /* Caso 2: Ya se envió, verificar si puedo reenviar */
     double time_since_last = difftime(now, req->sent);
-    printf("$$$ -> Time since last send: %.1f seconds, Times sent: %d\n", 
+    printf("$$$ -> Time since last send: %.1f seconds, Times sent: %d\n",
            time_since_last, req->times_sent);
-    
-    if (time_since_last >= 1.0) { /* Rate limiting: mínimo 1 segundo entre envíos  */ 
-        if (req->times_sent < 5) { /* Retry limit: máximo 5 intentos */ 
+   
+    if (time_since_last >= 1.0) { /* Rate limiting: mínimo 1 segundo entre envíos  */
+        if (req->times_sent < 5) { /* Retry limit: máximo 5 intentos */
             printf("$$$ -> Resending ARP request (attempt %d)\n", req->times_sent + 1);
             sr_arp_request_send(sr, req->ip, req->iface);
             req->sent = now;
@@ -155,6 +112,7 @@ void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
 /* Envía un mensaje ICMP host unreachable a los emisores de los paquetes esperando en la cola de una solicitud ARP */
 void host_unreachable(struct sr_instance *sr, struct sr_arpreq *req) {
     /* COLOQUE SU CÓDIGO AQUÍ */
+
     struct sr_packet *paquete = req->packets;
     while (paquete!= NULL){
         uint8_t *ethernet_trama = paquete->buf;
