@@ -454,30 +454,13 @@ void sr_handle_arp_packet(struct sr_instance *sr,
         /* Insertar el mapeo IP->MAC en la caché ARP */
         struct sr_arpreq *req = sr_arpcache_insert(&sr->cache, arpHdr->ar_sha, arpHdr->ar_sip);
         if (req) {
-            /* Enviar todos los paquetes pendientes que esperaban esta respuesta ARP */
-            struct sr_packet *currPacket = req->packets;
-            while (currPacket) {
-                sr_ethernet_hdr_t *pktEthHdr = (sr_ethernet_hdr_t *)currPacket->buf;
-                memcpy(pktEthHdr->ether_shost, sr_get_interface(sr, currPacket->iface)->addr, ETHER_ADDR_LEN);
-                memcpy(pktEthHdr->ether_dhost, arpHdr->ar_sha, ETHER_ADDR_LEN);
-
-                /* Crear una copia del paquete para enviar */
-                uint8_t *copyPacket = (uint8_t *)malloc(currPacket->len);
-                if (!copyPacket) {
-                    printf("*** -> Falló la asignación de memoria para la copia del paquete.\n");
-                    currPacket = currPacket->next;
-                    continue;
-                }
-                memcpy(copyPacket, currPacket->buf, currPacket->len);
-
-                /* Enviar el paquete */
-                print_hdrs(copyPacket, currPacket->len);
-                sr_send_packet(sr, copyPacket, currPacket->len, currPacket->iface);
-                free(copyPacket);
-
-                currPacket = currPacket->next;
+            /* Obtener la interfaz por la que llegó el paquete */
+            struct sr_if *iface = sr_get_interface(sr, interface);
+            if (iface) {
+                /* Enviar todos los paquetes pendientes usando la función auxiliar */
+                sr_arp_reply_send_pending_packets(sr, req, arpHdr->ar_sha, iface->addr, iface);
             }
-
+            
             /* Destruir la solicitud ARP ya que se recibió la respuesta */
             sr_arpreq_destroy(&sr->cache, req);
         }
@@ -502,14 +485,23 @@ void sr_arp_reply_send_pending_packets(struct sr_instance *sr,
 
   while (currPacket != NULL) {
      ethHdr = (sr_ethernet_hdr_t *) currPacket->buf;
-     memcpy(ethHdr->ether_shost, shost, sizeof(uint8_t) * ETHER_ADDR_LEN);
+     
+     /* Obtener la interfaz correcta para este paquete (cada paquete puede tener una interfaz diferente) */
+     struct sr_if *pkt_iface = sr_get_interface(sr, currPacket->iface);
+     if (pkt_iface) {
+         memcpy(ethHdr->ether_shost, pkt_iface->addr, sizeof(uint8_t) * ETHER_ADDR_LEN);
+     } else {
+         /* Fallback a la interfaz proporcionada si no se encuentra la del paquete */
+         memcpy(ethHdr->ether_shost, shost, sizeof(uint8_t) * ETHER_ADDR_LEN);
+     }
      memcpy(ethHdr->ether_dhost, dhost, sizeof(uint8_t) * ETHER_ADDR_LEN);
 
      copyPacket = malloc(sizeof(uint8_t) * currPacket->len);
      memcpy(copyPacket, ethHdr, sizeof(uint8_t) * currPacket->len);
 
      print_hdrs(copyPacket, currPacket->len);
-     sr_send_packet(sr, copyPacket, currPacket->len, iface->name);
+     /* Usar la interfaz del paquete individual */
+     sr_send_packet(sr, copyPacket, currPacket->len, currPacket->iface);
      free(copyPacket);
      currPacket = currPacket->next;
   }
