@@ -119,11 +119,11 @@ void sr_rip_send_response(struct sr_instance* sr, struct sr_if* interface, uint3
     /* Reservar buffer para paquete completo con cabecera Ethernet */
     pthread_mutex_lock(&rip_metadata_lock);
    
-    /* Primero, contar cuántas entradas RIP vamos a incluir */
+    /* Primero, contar cuántas entradas RIP vamos a incluir (máximo 25) */
     int entry_count = 0;
     struct sr_rt* rt = sr->routing_table;
-    while (rt != NULL) {
-        /* Todas las rutas se incluyen (split horizon se aplica a la métrica, no a la inclusión) */
+    while (rt != NULL && entry_count < RIP_MAX_ENTRIES) {
+        /* Todas las rutas se incluyen hasta el máximo (split horizon se aplica a la métrica, no a la inclusión) */
         entry_count++;
         rt = rt->next;
     }
@@ -200,26 +200,28 @@ void sr_rip_send_response(struct sr_instance* sr, struct sr_if* interface, uint3
     rip_packet->version = RIP_VERSION;
     rip_packet->zero = 0;
    
-    /* Recorrer toda la tabla de enrutamiento - bloquear de nuevo para acceder a la tabla */
+    /* Recorrer toda la tabla de enrutamiento hasta el máximo de 25 rutas - bloquear de nuevo para acceder a la tabla */
     pthread_mutex_lock(&rip_metadata_lock);
     int entry_idx = 0;
     rt = sr->routing_table;
-    while (rt != NULL && entry_idx < entry_count) {
+    while (rt != NULL && entry_idx < RIP_MAX_ENTRIES) {
         sr_rip_entry_t* entry = &rip_packet->entries[entry_idx];
        
         /* Considerar split horizon con poisoned reverse y rutas expiradas por timeout cuando corresponda */
         uint32_t metric = rt->metric;
-       
+        
         /* Si la ruta es inválida (expiró por timeout), usar métrica INFINITY */
         if (rt->valid == 0) {
             metric = INFINITY;
         } else if (rt->learned_from != 0) {
-            /* Ruta aprendida de un vecino - verificar split horizon */
+            /* Ruta aprendida de un vecino - verificar split horizon con poisoned reverse */
+            #if ENABLE_SPLIT_HORIZON_POISONED_REVERSE
             struct sr_if* learned_if = sr_get_interface(sr, rt->interface);
             if (learned_if && strcmp(learned_if->name, interface->name) == 0) {
                 /* Split horizon con poisoned reverse: anunciar con métrica INFINITY */
                 metric = INFINITY;
             }
+            #endif
         }
        
         /* Normalizar métrica a rango RIP (1..INFINITY) */
