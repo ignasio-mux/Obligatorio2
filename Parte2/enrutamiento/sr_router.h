@@ -19,7 +19,7 @@
 
 /* we dont like this debug , but what to do for varargs ? */
 #ifdef _DEBUG_
-#define DEBUG_ENABLED 1 // si se pone en 0 desaparece la salida de la función Debug
+#define DEBUG_ENABLED 1 /* si se pone en 0 desaparece la salida de la función Debug */
 
 #if DEBUG_ENABLED
 #define Debug(fmt, ...) printf(fmt "\n", ##__VA_ARGS__)
@@ -78,7 +78,6 @@ void sr_handlepacket(struct sr_instance* , uint8_t * , unsigned int , char* );
 void sr_handle_arp_packet(struct sr_instance*, uint8_t *, unsigned int, uint8_t *, uint8_t *, char *, sr_ethernet_hdr_t *);
 void sr_handle_ip_packet(struct sr_instance*, uint8_t *, unsigned int, uint8_t *, uint8_t *, char *, sr_ethernet_hdr_t *);
 void sr_send_icmp_error_packet(uint8_t, uint8_t, struct sr_instance*, uint32_t, uint8_t*);
-struct sr_rt *sr_find_lpm_entry(struct sr_instance *sr, uint32_t ip_addr);
 int is_packet_for_me(struct sr_instance*, uint32_t);
 
 /* -- sr_if.c -- */

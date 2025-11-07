@@ -53,7 +53,7 @@ void print_hdr_arp(uint8_t *buf);
 void print_hdrs(uint8_t *buf, uint32_t length);
 void print_routing_table(struct sr_instance* sr);
 
-// PARTE 2
+/* PARTE 2 */
 uint16_t udp_cksum(const struct sr_ip_hdr* ip_hdr, const struct sr_udp_hdr* udp_hdr, const uint8_t* payload);
 
 #endif /* -- SR_UTILS_H -- */

@@ -59,6 +59,8 @@ void sr_add_rt_entry(struct sr_instance* sr,
 
 void sr_print_routing_table(struct sr_instance* sr);
 void sr_print_routing_entry(struct sr_rt* entry);
+struct sr_rt*sr_find_lpm_entry(struct sr_instance *sr, uint32_t ip_addr);
+struct sr_rt* sr_find_learned_route (struct sr_rt* head, uint32_t dest_ip, uint32_t dest_mask);
 
 /* Parte 2 */
 void sr_del_rt_entry(struct sr_rt** head, struct sr_rt* victim);

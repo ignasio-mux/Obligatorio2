@@ -62,17 +62,17 @@ int is_packet_valid(uint8_t *packet /* lent */,
   int cumulative_sz = sizeof(sr_ethernet_hdr_t);
   sr_ethernet_hdr_t *eHdr = (sr_ethernet_hdr_t *) packet;
     
-  //printf("*** -> Perform validation on the packet.\n");
+  /* printf("*** -> Perform validation on the packet.\n"); */
 
   if (eHdr->ether_type == htons(ethertype_arp)) {
-    //printf("**** -> Validate ARP packet.\n");
+    /*printf("**** -> Validate ARP packet.\n"); */
     cumulative_sz += sizeof(sr_arp_hdr_t);
     if (len < cumulative_sz) {
        printf("***** -> Invalid packet length.\n");
        return 0;
     }
   } else if (eHdr->ether_type == htons(ethertype_ip)) {
-    //printf("**** -> Validate IP packet.\n");
+    /* printf("**** -> Validate IP packet.\n"); */
     sr_ip_hdr_t *ipHdr = (sr_ip_hdr_t *) (packet + cumulative_sz);
     cumulative_sz += sizeof(sr_ip_hdr_t);
 
@@ -87,7 +87,7 @@ int is_packet_valid(uint8_t *packet /* lent */,
     }
 
     if (ipHdr->ip_p == ip_protocol_icmp) {
-      //printf("***** -> IP packet is ICMP packet. Validate ICMP packet.\n");
+      /* printf("***** -> IP packet is ICMP packet. Validate ICMP packet.\n"); */
       int icmpOffset = cumulative_sz;
       sr_icmp_hdr_t *icmpHdr = (sr_icmp_hdr_t *) (packet + cumulative_sz);
       cumulative_sz += sizeof(sr_icmp_hdr_t);
@@ -119,7 +119,7 @@ int is_packet_valid(uint8_t *packet /* lent */,
       return 1;
     }    
   }
-  //printf("*** -> Packet validation complete. Packet is valid.\n");
+  /* printf("*** -> Packet validation complete. Packet is valid.\n"); */
   return 1;
 }
 

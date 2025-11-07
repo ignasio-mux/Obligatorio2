@@ -17,10 +17,10 @@
 #include <pthread.h>
 #include <sys/time.h>
 #include <arpa/inet.h>
+#include <stdbool.h>
 #include "sr_router.h"
 #include "sr_rt.h"
 #include "sr_rip.h"
-
 #include "sr_utils.h"
 
 static pthread_mutex_t rip_metadata_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -91,8 +91,90 @@ int sr_rip_update_route(struct sr_instance* sr,
      *
      */
 
+    
+    uint32_t costo = rte->metric;
+    time_t now = time(NULL);
+    struct sr_rt* entry_in_rt = sr_find_learned_route(sr->routing_table,rte->ip, rte->mask);
+    struct in_addr dest, gw, mask;
+
+    if (costo >= 16) { 
+        if (entry_in_rt != NULL && entry_in_rt->learned_from == src_ip) {
+            entry_in_rt->valid = 0;
+            entry_in_rt->metric = INFINITY;
+            entry_in_rt->garbage_collection_time = now;
+            return 1;
+        } else return 0;
+    }
+
+    /* Calcula la nueva métrica sumando el coste del enlace de la interfaz */
+    struct sr_if* in_enlace = sr_get_interface(sr,in_ifname);
+    if (in_enlace == NULL) return -1;
+    
+    uint32_t costo_enlace = in_enlace->cost;
+    uint32_t nuevo_costo = costo_enlace + costo;
+
+    /* Si resulta >=16 descarta la actualización */
+    if (nuevo_costo >= 16) return 0;
+
+    /* Si la ruta no existe, inserta una nueva entrada en la tabla de enrutamiento */
+    if (entry_in_rt == NULL){
+        dest.s_addr = rte->ip;
+        gw.s_addr = src_ip; 
+        mask.s_addr = rte->mask;
+        sr_add_rt_entry(sr, dest, gw, mask, in_ifname, nuevo_costo, 0, src_ip, now, 1,now);
+        return 1;
+    
+    /* Si la entrada existe pero está inválida, la revive actualizando métrica, 
+    gateway, learned_from, interfaz y timestamps */
+    } else if (entry_in_rt->valid == 0) {
+        entry_in_rt->metric = nuevo_costo;
+        entry_in_rt->gw.s_addr = src_ip;
+        entry_in_rt->learned_from = src_ip;
+        memcpy(entry_in_rt->interface, in_ifname, sr_IFACE_NAMELEN);
+        entry_in_rt->last_updated = now;
+        return 1;
+    
+    /* Si la entrada fue aprendida del mismo vecino:
+    Actualiza métrica/gateway/timestamps si cambian; si no, solo refresca el timestamp */
+    }else {
+        if (entry_in_rt->learned_from == src_ip) {
+            if (entry_in_rt->metric != nuevo_costo) entry_in_rt->metric = nuevo_costo;
+            entry_in_rt->last_updated = now;
+            return 1;
+    
+        /* Si la entrada viene de otro origen */
+        } else {
+
+            /* - Reemplaza la ruta si la nueva métrica es mejor. */
+            if(entry_in_rt->metric > nuevo_costo) {
+                dest.s_addr = rte->ip;
+                gw.s_addr = src_ip; 
+                mask.s_addr = rte->mask;
+                sr_del_rt_entry(&sr->routing_table, entry_in_rt);                
+                sr_add_rt_entry(sr, dest, gw, mask, in_ifname, nuevo_costo, 0, src_ip, now, 1,now);
+                return 1;
+            
+            /* - Si la métrica es igual y el next-hop coincide, refresca la entrada.*/
+            } else if (entry_in_rt->metric == nuevo_costo && entry_in_rt->gw.s_addr == src_ip) {
+                entry_in_rt->last_updated = now;                
+                return 1;
+            /*- En caso contrario (peor métrica o diferente camino), ignora la actualización.*/    
+            }else return 0;
+        }
+    }
     return 0;
 }
+
+/* Compilar con gcc -Dtriggered_update_off para desactivar las triggered_update */
+#ifndef triggered_update_off
+void sr_rip_send_triggered_update(struct sr_instance* sr) {
+    struct sr_if* interface = sr->if_list;
+    while (interface != NULL) {
+        sr_rip_send_response(sr, interface, RIP_IP);    
+        interface = interface->next;
+    }
+}
+#endif
 
 void sr_handle_rip_packet(struct sr_instance* sr,
                           const uint8_t* packet,
@@ -102,18 +184,69 @@ void sr_handle_rip_packet(struct sr_instance* sr,
                           unsigned int rip_len,
                           const char* in_ifname)
 {
-    sr_rip_packet_t* rip_packet = (struct sr_rip_packet_t*)(packet + rip_off);
-
+    
     /* Validar paquete RIP */
+    
+    /* Si es un RIP_COMMAND_REQUEST, enviar respuesta por la interfaz donde llegó, se sugiere usar función auxiliar 
+    sr_rip_send_response */
 
-    /* Si es un RIP_COMMAND_REQUEST, enviar respuesta por la interfaz donde llegó, se sugiere usar función auxiliar sr_rip_send_response */
-
-    /* Si no es un REQUEST, entonces es un RIP_COMMAND_RESPONSE. En caso que no sea un REQUEST o RESPONSE no pasa la validación. */
+    /* Si no es un REQUEST, entonces es un RIP_COMMAND_RESPONSE. 
+    En caso que no sea un REQUEST o RESPONSE no pasa la validación. */
     
     /* Procesar entries en el paquete de RESPONSE que llegó, se sugiere usar función auxiliar sr_rip_update_route */
 
     /* Si hubo un cambio en la tabla, generar triggered update e imprimir tabla */
-}
+
+    sr_rip_packet_t* rip_packet = (sr_rip_packet_t*)(packet + rip_off);
+    sr_ip_hdr_t* ip_packet = (sr_ip_hdr_t*)(packet + ip_off);
+    uint32_t dest_ip = ip_packet->ip_dst;
+    uint32_t orig_ip = ip_packet->ip_src;
+
+    /* Validar paquete RIP */
+    int valid = sr_rip_validate_packet(rip_packet, rip_len);
+    if (valid != 1) {
+        printf("Paquete RIP no válido\n");
+        return ;
+    }
+
+    /* Si es un RIP_COMMAND_REQUEST, enviar respuesta por la interfaz donde llegó, 
+       se sugiere usar función auxiliar sr_rip_send_response */
+    if (rip_packet->command == RIP_COMMAND_REQUEST){
+        struct sr_if* in_face = sr_get_interface(sr, in_ifname);
+        sr_rip_send_response(sr, in_face, dest_ip);
+        printf("Respuesta RIP enviada\n");
+        return;
+    }
+    
+    /* Si no es un REQUEST, entonces es un RIP_COMMAND_RESPONSE */
+    if (rip_packet->command == RIP_COMMAND_RESPONSE) {
+        /* Procesar entries en el paquete de RESPONSE que llegó, se sugiere usar función auxiliar sr_rip_update_route */
+        sr_rip_entry_t rip_entry;
+        bool rt_changed = false;
+        int num_entries = (rip_len - 4)/sizeof(sr_rip_entry_t);
+        for(int i = 0; i < num_entries && i <= 25 ; i++) {
+            rip_entry = rip_packet->entries[i];
+            int res = sr_rip_update_route(sr, &rip_entry, orig_ip, in_ifname);
+            if (res == 1)
+                rt_changed = true;
+        }    
+
+        if (rt_changed){                
+            /* Si hubo un cambio en la tabla, generar triggered update e imprimir tabla */
+            printf("La tabla de rutas fue modificada\n");                
+            printf("Se envia un mensaje RIP a todos los nodos vecinos\n");
+            sr_rip_send_triggered_update(sr);
+            printf("La tabla de rutas es:\n");
+            sr_print_routing_table(sr);
+        
+        } else printf("No se realizaron cambios\n");
+        return;
+    }
+            
+    /* En caso que no sea un REQUEST o RESPONSE no pasa la validación. */    
+    printf("Paquete RIP no valido, no es una REQUEST o RESPONSE\n");
+    return;
+}    
 
 void sr_rip_send_response(struct sr_instance* sr, struct sr_if* interface, uint32_t ipDst) {
     /* Reservar buffer para paquete completo con cabecera Ethernet */
@@ -422,21 +555,6 @@ void* sr_rip_periodic_advertisement(void* arg) {
     }
    
     return NULL;
-}
-
-/* Envía una actualización triggered (inmediata) cuando hay cambios en la tabla de enrutamiento */
-void sr_rip_send_triggered_update(struct sr_instance* sr) {
-    /* Recorrer todas las interfaces y enviar una respuesta RIP por cada una */
-    struct sr_if* interface = sr->if_list;
-    
-    while (interface != NULL) {
-        /* Enviar respuesta RIP por multicast (RIP_IP) a través de esta interfaz */
-        /* RIP_IP está definido como 0xE0000009 en host byte order */
-        /* Convertir a network byte order para pasarlo a sr_rip_send_response */
-        sr_rip_send_response(sr, interface, htonl(RIP_IP));
-        
-        interface = interface->next;
-    }
 }
 
 /* Chequea las rutas y marca las que expiran por timeout */

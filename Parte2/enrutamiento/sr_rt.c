@@ -12,6 +12,7 @@
 #include <assert.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdbool.h>
 
 
 #include <sys/socket.h>
@@ -101,6 +102,36 @@ int sr_load_rt(struct sr_instance* sr, const char* filename)
 
     fclose(fp);
     return 0;
+}
+
+struct sr_rt *sr_find_lpm_entry(struct sr_instance *sr, uint32_t ip_addr) {
+    /* Busco la mejor ruta para una IP usando Longest Prefix Match */
+    struct sr_rt *rt = sr->routing_table;
+    struct sr_rt *match = NULL;
+    uint32_t max_mask = 0;
+    while (rt) {
+        if ((rt->dest.s_addr & rt->mask.s_addr) == (ip_addr & rt->mask.s_addr)) {
+            uint32_t mask_val = ntohl(rt->mask.s_addr);
+            if (mask_val > max_mask) {
+                max_mask = mask_val;
+                match = rt;
+            }
+        }
+        rt = rt->next;
+    }
+    return match;
+}
+
+struct sr_rt* sr_find_learned_route (struct sr_rt* head, uint32_t dest_ip, uint32_t dest_mask){
+    bool find = false;
+    while (head != NULL && !find) {
+        if(head->dest.s_addr == dest_ip && head->mask.s_addr == dest_mask) 
+            find = true; 
+        else 
+            head = head->next;     
+    }
+
+    return head;
 }
 
 /*---------------------------------------------------------------------
