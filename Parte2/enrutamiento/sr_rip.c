@@ -92,9 +92,12 @@ int sr_rip_update_route(struct sr_instance* sr,
      */
 
     
-    uint32_t costo = rte->metric;
+    /* Los campos del paquete RIP están en network byte order, convertir a host byte order */
+    uint32_t costo = ntohl(rte->metric);
+    uint32_t rte_ip = rte->ip;  /* Ya está en network byte order */
+    uint32_t rte_mask = rte->mask;  /* Ya está en network byte order */
     time_t now = time(NULL);
-    struct sr_rt* entry_in_rt = sr_find_learned_route(sr->routing_table,rte->ip, rte->mask);
+    struct sr_rt* entry_in_rt = sr_find_learned_route(sr->routing_table, rte_ip, rte_mask);
     struct in_addr dest, gw, mask;
 
     if (costo >= 16) { 
@@ -108,19 +111,23 @@ int sr_rip_update_route(struct sr_instance* sr,
 
     /* Calcula la nueva métrica sumando el coste del enlace de la interfaz */
     struct sr_if* in_enlace = sr_get_interface(sr,in_ifname);
-    if (in_enlace == NULL) return -1;
+    if (in_enlace == NULL) {
+        return -1;
+    }
     
     uint32_t costo_enlace = in_enlace->cost;
     uint32_t nuevo_costo = costo_enlace + costo;
 
     /* Si resulta >=16 descarta la actualización */
-    if (nuevo_costo >= 16) return 0;
+    if (nuevo_costo >= 16) {
+        return 0;
+    }
 
     /* Si la ruta no existe, inserta una nueva entrada en la tabla de enrutamiento */
     if (entry_in_rt == NULL){
-        dest.s_addr = rte->ip;
+        dest.s_addr = rte_ip;
         gw.s_addr = src_ip; 
-        mask.s_addr = rte->mask;
+        mask.s_addr = rte_mask;
         sr_add_rt_entry(sr, dest, gw, mask, in_ifname, nuevo_costo, 0, src_ip, now, 1,now);
         return 1;
     
@@ -132,24 +139,29 @@ int sr_rip_update_route(struct sr_instance* sr,
         entry_in_rt->learned_from = src_ip;
         memcpy(entry_in_rt->interface, in_ifname, sr_IFACE_NAMELEN);
         entry_in_rt->last_updated = now;
+        entry_in_rt->valid = 1;
         return 1;
     
     /* Si la entrada fue aprendida del mismo vecino:
     Actualiza métrica/gateway/timestamps si cambian; si no, solo refresca el timestamp */
     }else {
         if (entry_in_rt->learned_from == src_ip) {
-            if (entry_in_rt->metric != nuevo_costo) entry_in_rt->metric = nuevo_costo;
+            if (entry_in_rt->metric != nuevo_costo) {
+                entry_in_rt->metric = nuevo_costo;
+            }
+            if (entry_in_rt->gw.s_addr != src_ip) {
+                entry_in_rt->gw.s_addr = src_ip;
+            }
             entry_in_rt->last_updated = now;
             return 1;
     
         /* Si la entrada viene de otro origen */
         } else {
-
             /* - Reemplaza la ruta si la nueva métrica es mejor. */
             if(entry_in_rt->metric > nuevo_costo) {
-                dest.s_addr = rte->ip;
+                dest.s_addr = rte_ip;
                 gw.s_addr = src_ip; 
-                mask.s_addr = rte->mask;
+                mask.s_addr = rte_mask;
                 sr_del_rt_entry(&sr->routing_table, entry_in_rt);                
                 sr_add_rt_entry(sr, dest, gw, mask, in_ifname, nuevo_costo, 0, src_ip, now, 1,now);
                 return 1;
@@ -159,7 +171,9 @@ int sr_rip_update_route(struct sr_instance* sr,
                 entry_in_rt->last_updated = now;                
                 return 1;
             /*- En caso contrario (peor métrica o diferente camino), ignora la actualización.*/    
-            }else return 0;
+            }else {
+                return 0;
+            }
         }
     }
     return 0;
@@ -214,7 +228,6 @@ void sr_handle_rip_packet(struct sr_instance* sr,
     if (rip_packet->command == RIP_COMMAND_REQUEST){
         struct sr_if* in_face = sr_get_interface(sr, in_ifname);
         sr_rip_send_response(sr, in_face, dest_ip);
-        printf("Respuesta RIP enviada\n");
         return;
     }
     
@@ -233,13 +246,10 @@ void sr_handle_rip_packet(struct sr_instance* sr,
 
         if (rt_changed){                
             /* Si hubo un cambio en la tabla, generar triggered update e imprimir tabla */
-            printf("La tabla de rutas fue modificada\n");                
-            printf("Se envia un mensaje RIP a todos los nodos vecinos\n");
             sr_rip_send_triggered_update(sr);
             printf("La tabla de rutas es:\n");
-            sr_print_routing_table(sr);
-        
-        } else printf("No se realizaron cambios\n");
+            print_routing_table(sr);
+        }
         return;
     }
             
@@ -482,32 +492,103 @@ void* sr_rip_send_requests(void* arg) {
 void* sr_rip_periodic_advertisement(void* arg) {
     struct sr_instance* sr = arg;
 
-
-    sleep(2); // Esperar a que se inicialice todo
+    // Esperar a que las interfaces estén configuradas
+    int wait_count = 0;
+    bool all_interfaces_ready = false;
+    while (wait_count < 50 && !all_interfaces_ready) {
+        if (sr->if_list == NULL) {
+            sleep(1);
+            wait_count++;
+            continue;
+        }
+        
+        // Verificar que todas las interfaces tengan IP y máscara configuradas
+        all_interfaces_ready = true;
+        struct sr_if* if_check = sr->if_list;
+        while (if_check != NULL) {
+            uint32_t mask_val = if_check->mask;
+            uint32_t mask_nbo = htonl(mask_val);  /* Convertir a network byte order para verificación */
+            bool mask_valid = (mask_val != 0) && 
+                              ((mask_nbo >= 0xff000000) ||  /* /8 o más específica en NBO */
+                               (mask_nbo == 0xffff0000) ||  /* /16 en NBO */
+                               (mask_nbo == 0xffffff00) ||  /* /24 en NBO */
+                               (mask_nbo == 0xffffffff) ||  /* /32 en NBO */
+                               (mask_val == 0x00ffffff) ||  /* /24 en host byte order (little-endian) */
+                               (mask_val == 0x0000ffff) ||  /* /16 en host byte order */
+                               (mask_val == 0x000000ff));  /* /8 en host byte order */
+            
+            if (if_check->ip == 0 || !mask_valid) {
+                all_interfaces_ready = false;
+                break;
+            }
+            if_check = if_check->next;
+        }
+        
+        if (!all_interfaces_ready) {
+            sleep(1);
+            wait_count++;
+        }
+    }
    
     // Agregar las rutas directamente conectadas
     /************************************************************************************/
     pthread_mutex_lock(&rip_metadata_lock);
     struct sr_if* int_temp = sr->if_list;
+    int count = 0;
     while(int_temp != NULL)
     {
+        /* Verificar que la interfaz tenga IP y máscara válidas */
+        /* Las máscaras pueden estar en network byte order o host byte order */
+        /* Verificar ambos casos: network byte order y host byte order (little-endian) */
+        uint32_t mask_val = int_temp->mask;
+        uint32_t mask_nbo = htonl(mask_val);  /* Convertir a network byte order para verificación */
+        bool mask_valid = (mask_val != 0) && 
+                          ((mask_nbo >= 0xff000000) ||  /* /8 o más específica en NBO */
+                           (mask_nbo == 0xffff0000) ||  /* /16 en NBO */
+                           (mask_nbo == 0xffffff00) ||  /* /24 en NBO */
+                           (mask_nbo == 0xffffffff) ||  /* /32 en NBO */
+                           (mask_val == 0x00ffffff) ||  /* /24 en host byte order (little-endian) */
+                           (mask_val == 0x0000ffff) ||  /* /16 en host byte order */
+                           (mask_val == 0x000000ff));  /* /8 en host byte order */
+        
+        if (int_temp->ip == 0 || !mask_valid) {
+            int_temp = int_temp->next;
+            continue;
+        }
+        
         struct in_addr ip;
         ip.s_addr = int_temp->ip;
         struct in_addr gw;
         gw.s_addr = 0x00000000;
         struct in_addr mask;
-        mask.s_addr =  int_temp->mask;
+        /* Las máscaras pueden estar en host byte order (little-endian) o network byte order */
+        /* 0x00ffffff en little-endian = 255.255.255.0 = 0xffffff00 en big-endian */
+        uint32_t mask_raw = int_temp->mask;
+        /* Construir la máscara correctamente en network byte order usando inet_addr */
+        if (mask_raw == 0x00ffffff) {
+            /* Máscara /24: 255.255.255.0 */
+            mask.s_addr = inet_addr("255.255.255.0");
+        } else if (mask_raw == 0x0000ffff) {
+            /* Máscara /16: 255.255.0.0 */
+            mask.s_addr = inet_addr("255.255.0.0");
+        } else if (mask_raw == 0x000000ff) {
+            /* Máscara /8: 255.0.0.0 */
+            mask.s_addr = inet_addr("255.0.0.0");
+        } else if (mask_raw == 0xffffff00 || mask_raw == 0xffff0000 || mask_raw == 0xff000000) {
+            /* Ya está en network byte order, usar directamente */
+            mask.s_addr = mask_raw;
+        } else {
+            /* Intentar convertir con htonl por si acaso */
+            mask.s_addr = htonl(mask_raw);
+        }
         struct in_addr network;
         network.s_addr = ip.s_addr & mask.s_addr;
         uint8_t metric = int_temp->cost ? int_temp->cost : 1;
-
 
         for (struct sr_rt* it = sr->routing_table; it; it = it->next) {
         if (it->dest.s_addr == network.s_addr && it->mask.s_addr == mask.s_addr)
             sr_del_rt_entry(&sr->routing_table, it);
         }
-        Debug("-> RIP: Adding the directly connected network [%s, ", inet_ntoa(network));
-        Debug("%s] to the routing table\n", inet_ntoa(mask));
         sr_add_rt_entry(sr,
                         network,
                         gw,
@@ -519,12 +600,11 @@ void* sr_rip_periodic_advertisement(void* arg) {
                         time(NULL),
                         1,
                         0);
+        count++;
         int_temp = int_temp->next;
     }
    
     pthread_mutex_unlock(&rip_metadata_lock);
-    Debug("\n-> RIP: Printing the forwarding table\n");
-    print_routing_table(sr);
     /************************************************************************************/
 
 
@@ -726,3 +806,4 @@ int sr_rip_init(struct sr_instance* sr) {
 
     return 0;
 }
+

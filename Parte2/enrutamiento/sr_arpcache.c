@@ -18,6 +18,8 @@
 */
 void sr_arp_request_send(struct sr_instance *sr, uint32_t ip, char* iface) {
     
+    printf("$$$ -> Send ARP request.\n");
+    
     /* Obtener la interfaz correspondiente */
     struct sr_if *sr_iface = sr_get_interface(sr, iface);
     if (!sr_iface) {
@@ -71,16 +73,9 @@ void sr_arp_request_send(struct sr_instance *sr, uint32_t ip, char* iface) {
 */
 void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
     time_t now = time(NULL);
-   
-    printf("$$$ -> Handling ARP request for IP: ");
-    print_addr_ip_int(req->ip);
 
     /* Caso 1: Nunca se ha enviado la solicitud ARP */
     if (req->sent == 0) {
-        printf("$$$ -> First ARP request for this IP: ");
-        print_addr_ip_int(req->ip);
-        printf("$$$ -> Interface for this IP: ");
-        printf("%s\n",req->iface);
         sr_arp_request_send(sr, req->ip, req->iface);
         req->sent = now;
         req->times_sent = 1;
@@ -89,37 +84,41 @@ void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
    
     /* Caso 2: Ya se envió, verificar si puedo reenviar */
     double time_since_last = difftime(now, req->sent);
-    printf("$$$ -> Time since last send: %.1f seconds, Times sent: %d\n",
-           time_since_last, req->times_sent);
    
     if (time_since_last >= 1.0) { /* Rate limiting: mínimo 1 segundo entre envíos  */
         if (req->times_sent < 5) { /* Retry limit: máximo 5 intentos */
-            printf("$$$ -> Resending ARP request (attempt %d)\n", req->times_sent + 1);
             sr_arp_request_send(sr, req->ip, req->iface);
             req->sent = now;
             req->times_sent++;
         } else {
-            /* // Excedí el límite de reintentos, host no alcanzable */
-            printf("$$$ -> ARP request limit exceeded, sending Host Unreachable\n");
+            /* Excedí el límite de reintentos, host no alcanzable */
             host_unreachable(sr, req);
             sr_arpreq_destroy(&sr->cache, req);
         }
-    } else {
-        printf("$$$ -> Rate limiting: waiting %.1f more seconds\n", 1.0 - time_since_last);
     }
 }
 
 /* Envía un mensaje ICMP host unreachable a los emisores de los paquetes esperando en la cola de una solicitud ARP */
 void host_unreachable(struct sr_instance *sr, struct sr_arpreq *req) {
-    /* COLOQUE SU CÓDIGO AQUÍ */
-
     struct sr_packet *paquete = req->packets;
-    while (paquete!= NULL){
+    
+    while (paquete != NULL) {
+        /* Verificar que el paquete tenga suficiente longitud para contener headers Ethernet + IP */
+        if (paquete->len < sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t)) {
+            paquete = paquete->next;
+            continue;
+        }
+        
         uint8_t *ethernet_trama = paquete->buf;
         uint8_t *ip_paquete = ethernet_trama + sizeof(sr_ethernet_hdr_t);
         sr_ip_hdr_t *ip_hdr = (sr_ip_hdr_t *)ip_paquete;
+        
+        /* Obtener la IP del emisor del paquete original (destino del ICMP error) */
         uint32_t ip_destino = ip_hdr->ip_src;
-        sr_send_icmp_error_packet(3,1,sr,ip_destino,ip_paquete);
+        
+        /* Enviar ICMP host unreachable */
+        sr_send_icmp_error_packet(3, 1, sr, ip_destino, ip_paquete);
+        
         paquete = paquete->next;
     }
 }
