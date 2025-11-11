@@ -169,6 +169,7 @@ void sr_send_icmp_error_packet(uint8_t type,
             handle_arpreq(sr, req);
         }
     } else if (type == 0){
+        printf("*** -> DEBUG: Entering ICMP echo reply handler (type 0)\n");
 
         unsigned int len_icmp = sizeof(sr_icmp_hdr_t);
         unsigned int len_ip   = sizeof(sr_ip_hdr_t);
@@ -209,13 +210,44 @@ void sr_send_icmp_error_packet(uint8_t type,
         ip_hdr->ip_dst = ipDst;
 
         /* Buscar interfaz de salida */
+        printf("*** -> DEBUG: Looking for route to IP: ");
+        print_addr_ip_int(htonl(ipDst));
+        printf("\n");
         struct sr_rt *match = sr_find_lpm_entry(sr, ipDst);
+        struct sr_if *iface = NULL;
+        
         if (!match) {
-            /* sr_send_icmp_error_packet(3,0,sr,ip,ip_paquete); */
-            free(ethernet_trama);
-            return;
+            /* No se encontró ruta en la tabla, buscar en interfaces directamente conectadas */
+            printf("*** -> DEBUG: No route found in routing table, checking directly connected interfaces\n");
+            struct sr_if *if_walker = sr->if_list;
+            while (if_walker) {
+                /* Verificar si la IP destino está en la red de esta interfaz */
+                uint32_t network = if_walker->ip & if_walker->mask;
+                uint32_t dst_network = ipDst & if_walker->mask;
+                if (network == dst_network) {
+                    printf("*** -> DEBUG: Found directly connected interface: %s\n", if_walker->name);
+                    iface = if_walker;
+                    break;
+                }
+                if_walker = if_walker->next;
+            }
+            if (!iface) {
+                printf("*** -> DEBUG: No directly connected interface found, discarding ICMP echo reply\n");
+                free(ethernet_trama);
+                return;
+            }
+        } else {
+            printf("*** -> DEBUG: Route found, interface: %s\n", match->interface);
+            iface = sr_get_interface(sr, match->interface);
+            if (!iface) {
+                printf("*** -> DEBUG: Interface not found!\n");
+                free(ethernet_trama);
+                return;
+            }
         }
-        struct sr_if *iface = sr_get_interface(sr, match->interface);
+        printf("*** -> DEBUG: Interface found, IP: ");
+        print_addr_ip_int(htonl(iface->ip));
+        printf("\n");
         ip_hdr->ip_src = iface->ip;
 
         /* Checksum IP */
@@ -230,14 +262,25 @@ void sr_send_icmp_error_packet(uint8_t type,
         eth_hdr->ether_type = htons(ethertype_ip);
         
         /* Resolver siguiente salto */
-        uint32_t next_hop_ip = (match->gw.s_addr) ? match->gw.s_addr : ipDst;
+        uint32_t next_hop_ip;
+        if (match) {
+            next_hop_ip = (match->gw.s_addr) ? match->gw.s_addr : ipDst;
+        } else {
+            /* Si no hay ruta en la tabla, es una red directamente conectada, usar IP destino */
+            next_hop_ip = ipDst;
+        }
+        printf("*** -> ICMP echo reply: Looking up ARP entry for next hop IP: ");
+        print_addr_ip_int(htonl(next_hop_ip));
+        printf("\n");
         struct sr_arpentry *arp_entry = sr_arpcache_lookup(&sr->cache, next_hop_ip);
         if (arp_entry) {
+            printf("*** -> ICMP echo reply: ARP entry found, sending packet\n");
             memcpy(eth_hdr->ether_dhost, arp_entry->mac, ETHER_ADDR_LEN);
             sr_send_packet(sr, ethernet_trama, total_len, iface->name);
             free(arp_entry);
             free(ethernet_trama);
         } else {
+            printf("*** -> ICMP echo reply: No ARP entry found, queuing packet for ARP request\n");
             struct sr_arpreq *req = sr_arpcache_queuereq(&sr->cache, next_hop_ip, ethernet_trama, total_len, iface->name);
             handle_arpreq(sr, req);
         }
@@ -278,6 +321,33 @@ void sr_handle_ip_packet(struct sr_instance *sr,
     print_addr_ip_int(htonl(dest_ip));
     printf("\n");
     
+    /* Actualizar caché ARP con la MAC origen del paquete */
+    /* Esto permite aprender la MAC del remitente cuando recibimos un paquete IP */
+    printf("*** -> DEBUG: Checking ARP cache for src IP\n");
+    struct sr_arpentry *existing_entry = sr_arpcache_lookup(&sr->cache, src_ip);
+    if (!existing_entry) {
+        /* No existe entrada ARP, insertar la nueva asociación IP->MAC */
+        printf("*** -> DEBUG: No ARP entry found, inserting new one\n");
+        sr_arpcache_insert(&sr->cache, srcAddr, src_ip);
+        printf("*** -> Learned MAC address for IP ");
+        print_addr_ip_int(htonl(src_ip));
+        printf(" from incoming packet\n");
+    } else {
+        printf("*** -> DEBUG: ARP entry exists, checking if MAC changed\n");
+        /* Ya existe entrada, verificar si la MAC cambió */
+        if (memcmp(existing_entry->mac, srcAddr, ETHER_ADDR_LEN) != 0) {
+            /* MAC cambió, actualizar la entrada */
+            printf("*** -> DEBUG: MAC changed, updating entry\n");
+            sr_arpcache_insert(&sr->cache, srcAddr, src_ip);
+            printf("*** -> Updated MAC address for IP ");
+            print_addr_ip_int(htonl(src_ip));
+            printf(" from incoming packet\n");
+        } else {
+            printf("*** -> DEBUG: MAC unchanged, using existing entry\n");
+        }
+        free(existing_entry);
+    }
+    
     /* Verificar si el paquete es para una de nuestras interfaces */
     if (is_packet_for_me(sr, dest_ip)) {
         printf("*** -> Packet is for us\n");
@@ -289,7 +359,9 @@ void sr_handle_ip_packet(struct sr_instance *sr,
             if (icmp_hdr->icmp_type == 8 && icmp_hdr->icmp_code == 0) { /* Echo request */
                 printf("*** -> ICMP echo request received, sending echo reply\n");
                 uint8_t *ipPacket = (packet + sizeof(sr_ethernet_hdr_t));
+                printf("*** -> DEBUG: About to call sr_send_icmp_error_packet with type=0, dst=%u\n", src_ip);
                 sr_send_icmp_error_packet(0,0,sr,src_ip,ipPacket);
+                printf("*** -> DEBUG: Returned from sr_send_icmp_error_packet\n");
                 printf("*** -> ICMP echo reply sending true\n");
                 return;
             }
