@@ -97,8 +97,8 @@ int sr_rip_update_route(struct sr_instance* sr,
     struct sr_rt* entry_in_rt = sr_find_learned_route(sr->routing_table,rte->ip, rte->mask);
     struct in_addr dest, gw, mask;
 
-    if (costo >= 16) { 
-        if (entry_in_rt != NULL && entry_in_rt->learned_from == src_ip) {
+    if (costo >= 16) {         
+        if (entry_in_rt != NULL && entry_in_rt->learned_from == src_ip && entry_in_rt->valid != 0) {
             entry_in_rt->valid = 0;
             entry_in_rt->metric = INFINITY;
             entry_in_rt->garbage_collection_time = now;
@@ -118,15 +118,16 @@ int sr_rip_update_route(struct sr_instance* sr,
 
     /* Si la ruta no existe, inserta una nueva entrada en la tabla de enrutamiento */
     if (entry_in_rt == NULL){
+        printf("Nueva ruta no conocida, inserta una nueva entrada en la tabla de enrutamiento\n");
         dest.s_addr = rte->ip;
         gw.s_addr = src_ip; 
         mask.s_addr = rte->mask;
         sr_add_rt_entry(sr, dest, gw, mask, in_ifname, nuevo_costo, 0, src_ip, now, 1,now);
         return 1;
-    
-    /* Si la entrada existe pero está inválida, la revive actualizando métrica, 
-    gateway, learned_from, interfaz y timestamps */
+
     } else if (entry_in_rt->valid == 0) {
+        /* Si la entrada existe pero está inválida, la revive actualizando métrica, 
+        gateway, learned_from, interfaz y timestamps */
         entry_in_rt->metric = nuevo_costo;
         entry_in_rt->gw.s_addr = src_ip;
         entry_in_rt->learned_from = src_ip;
@@ -138,9 +139,14 @@ int sr_rip_update_route(struct sr_instance* sr,
     Actualiza métrica/gateway/timestamps si cambian; si no, solo refresca el timestamp */
     }else {
         if (entry_in_rt->learned_from == src_ip) {
-            if (entry_in_rt->metric != nuevo_costo) entry_in_rt->metric = nuevo_costo;
-            entry_in_rt->last_updated = now;
-            return 1;
+            if (entry_in_rt->metric != nuevo_costo) {
+                entry_in_rt->metric = nuevo_costo;
+                entry_in_rt->last_updated = now;
+                return 1;
+            } else {
+                entry_in_rt->last_updated = now;
+                return 0;
+            }
     
         /* Si la entrada viene de otro origen */
         } else {
@@ -157,7 +163,7 @@ int sr_rip_update_route(struct sr_instance* sr,
             /* - Si la métrica es igual y el next-hop coincide, refresca la entrada.*/
             } else if (entry_in_rt->metric == nuevo_costo && entry_in_rt->gw.s_addr == src_ip) {
                 entry_in_rt->last_updated = now;                
-                return 1;
+                return 0;
             /*- En caso contrario (peor métrica o diferente camino), ignora la actualización.*/    
             }else return 0;
         }
@@ -165,8 +171,9 @@ int sr_rip_update_route(struct sr_instance* sr,
     return 0;
 }
 
-/* Compilar con gcc -Dtriggered_update_off para desactivar las triggered_update */
-#ifndef triggered_update_off
+#ifdef triggered_update_off
+void sr_rip_send_triggered_update(struct sr_instance* sr) {}
+#else
 void sr_rip_send_triggered_update(struct sr_instance* sr) {
     struct sr_if* interface = sr->if_list;
     while (interface != NULL) {
@@ -175,6 +182,7 @@ void sr_rip_send_triggered_update(struct sr_instance* sr) {
     }
 }
 #endif
+
 
 void sr_handle_rip_packet(struct sr_instance* sr,
                           const uint8_t* packet,
@@ -213,6 +221,11 @@ void sr_handle_rip_packet(struct sr_instance* sr,
        se sugiere usar función auxiliar sr_rip_send_response */
     if (rip_packet->command == RIP_COMMAND_REQUEST){
         struct sr_if* in_face = sr_get_interface(sr, in_ifname);
+        if (in_face == NULL) {
+            printf("NO SE ENCONTRO INTERFAZ DE SALIDA PARA ESTA IP: ");
+            print_addr_ip_int(htonl(dest_ip));
+            return;
+        }
         sr_rip_send_response(sr, in_face, dest_ip);
         printf("Respuesta RIP enviada\n");
         return;
@@ -223,7 +236,7 @@ void sr_handle_rip_packet(struct sr_instance* sr,
         /* Procesar entries en el paquete de RESPONSE que llegó, se sugiere usar función auxiliar sr_rip_update_route */
         sr_rip_entry_t rip_entry;
         bool rt_changed = false;
-        int num_entries = (rip_len - 4)/sizeof(sr_rip_entry_t);
+        int num_entries = (rip_len - 4)/sizeof(sr_rip_entry_t);        
         for(int i = 0; i < num_entries && i <= 25 ; i++) {
             rip_entry = rip_packet->entries[i];
             int res = sr_rip_update_route(sr, &rip_entry, orig_ip, in_ifname);
@@ -237,9 +250,13 @@ void sr_handle_rip_packet(struct sr_instance* sr,
             printf("Se envia un mensaje RIP a todos los nodos vecinos\n");
             sr_rip_send_triggered_update(sr);
             printf("La tabla de rutas es:\n");
-            sr_print_routing_table(sr);
+            //sr_print_routing_table(sr);
+            print_routing_table(sr);
         
-        } else printf("No se realizaron cambios\n");
+        } else{ 
+            printf("No se realizaron cambios\n");
+            print_routing_table(sr);
+        }
         return;
     }
             
@@ -348,8 +365,13 @@ void sr_rip_send_response(struct sr_instance* sr, struct sr_if* interface, uint3
             metric = INFINITY;
         } else if (rt->learned_from != 0) {
             /* Ruta aprendida de un vecino - verificar split horizon con poisoned reverse */
-            #if ENABLE_SPLIT_HORIZON_POISONED_REVERSE
+            #ifndef ENABLE_SPLIT_HORIZON_POISONED_REVERSE
             struct sr_if* learned_if = sr_get_interface(sr, rt->interface);
+            if (learned_if == NULL) {
+                printf("NO SE ENCONTRO INTERFAZ DE SALIDA PARA ESTA IP: ");
+                print_addr_ip_int(htonl(ipDst));
+                return;
+            }
             if (learned_if && strcmp(learned_if->name, interface->name) == 0) {
                 /* Split horizon con poisoned reverse: anunciar con métrica INFINITY */
                 metric = INFINITY;
@@ -370,7 +392,7 @@ void sr_rip_send_response(struct sr_instance* sr, struct sr_if* interface, uint3
         entry->ip = rt->dest.s_addr; /* Ya está en network byte order */
         entry->mask = rt->mask.s_addr; /* Ya está en network byte order */
         entry->next_hop = htonl(0); /* Siempre 0.0.0.0 */
-        entry->metric = htonl(metric);
+        entry->metric = metric;
        
         entry_idx++;
         rt = rt->next;
@@ -483,14 +505,16 @@ void* sr_rip_periodic_advertisement(void* arg) {
     struct sr_instance* sr = arg;
 
 
-    sleep(2); // Esperar a que se inicialice todo
+    sleep(10); // Esperar a que se inicialice todo
    
     // Agregar las rutas directamente conectadas
     /************************************************************************************/
     pthread_mutex_lock(&rip_metadata_lock);
     struct sr_if* int_temp = sr->if_list;
+    printf("-> RIP: Adding the directly connected networks ");
     while(int_temp != NULL)
-    {
+    {   
+        printf("-> RIP: Adding the directly connected networks 2");
         struct in_addr ip;
         ip.s_addr = int_temp->ip;
         struct in_addr gw;
@@ -507,6 +531,7 @@ void* sr_rip_periodic_advertisement(void* arg) {
             sr_del_rt_entry(&sr->routing_table, it);
         }
         Debug("-> RIP: Adding the directly connected network [%s, ", inet_ntoa(network));
+        printf("-> RIP: Adding the directly connected network [%s, ", inet_ntoa(network));
         Debug("%s] to the routing table\n", inet_ntoa(mask));
         sr_add_rt_entry(sr,
                         network,
@@ -723,6 +748,8 @@ int sr_rip_init(struct sr_instance* sr) {
         pthread_mutex_destroy(&sr->rip_subsys.lock);
         return -1;
     }
-
+    printf("****************************************************\n");
+    printf("RIP: Se inicializo correctamente\n");
+    printf("****************************************************\n");
     return 0;
 }

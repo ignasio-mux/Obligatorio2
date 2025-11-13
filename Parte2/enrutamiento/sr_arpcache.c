@@ -20,8 +20,9 @@ void sr_arp_request_send(struct sr_instance *sr, uint32_t ip, char* iface) {
     
     /* Obtener la interfaz correspondiente */
     struct sr_if *sr_iface = sr_get_interface(sr, iface);
-    if (!sr_iface) {
-        fprintf(stderr, "Interface not found for ARP request\n");
+    if (sr_iface == NULL) {
+        printf("NO SE ENCONTRO INTERFAZ DE SALIDA PARA ESTA IP: ");
+        print_addr_ip_int(htonl(ip));
         return;
     }
 
@@ -73,17 +74,20 @@ void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req) {
     time_t now = time(NULL);
    
     printf("$$$ -> Handling ARP request for IP: ");
-    print_addr_ip_int(req->ip);
+    print_addr_ip_int(ntohl(req->ip));
+    printf("\n");
 
     /* Caso 1: Nunca se ha enviado la solicitud ARP */
-    if (req->sent == 0) {
+    if (req->times_sent == 0) {
         printf("$$$ -> First ARP request for this IP: ");
-        print_addr_ip_int(req->ip);
+        print_addr_ip_int(ntohl(req->ip));
+        printf("\n");
         printf("$$$ -> Interface for this IP: ");
-        printf("%s\n",req->iface);
+        printf("%s",req->iface);
+        printf("\n");        
         sr_arp_request_send(sr, req->ip, req->iface);
         req->sent = now;
-        req->times_sent = 1;
+        req->times_sent = 1;  
         return;
     }
    
@@ -152,7 +156,8 @@ struct sr_arpentry *sr_arpcache_lookup(struct sr_arpcache *cache, uint32_t ip) {
     
     int i;
     for (i = 0; i < SR_ARPCACHE_SZ; i++) {
-        if ((cache->entries[i].valid) && (cache->entries[i].ip == ip)) {
+        if (cache->entries[i].valid && (cache->entries[i].ip == ip))
+        {
             entry = &(cache->entries[i]);
         }
     }
@@ -189,7 +194,7 @@ struct sr_arpreq *sr_arpcache_queuereq(struct sr_arpcache *cache,
             break;
         }
     }
-    
+
     /* If the IP wasn't found, add it */
     if (!req) {
         req = (struct sr_arpreq *) calloc(1, sizeof(struct sr_arpreq));
@@ -258,7 +263,6 @@ struct sr_arpreq *sr_arpcache_insert(struct sr_arpcache *cache,
     }
     
     pthread_mutex_unlock(&(cache->lock));
-    
     return req;
 }
 

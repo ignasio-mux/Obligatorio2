@@ -37,9 +37,6 @@ void sr_init(struct sr_instance* sr)
     /* Inicializa la caché y el hilo de limpieza de la caché */
     sr_arpcache_init(&(sr->cache));
 
-    /* Inicializa el subsistema RIP */
-    sr_rip_init(sr);
-
     /* Inicializa los atributos del hilo */
     pthread_attr_init(&(sr->attr));
     pthread_attr_setdetachstate(&(sr->attr), PTHREAD_CREATE_JOINABLE);
@@ -50,11 +47,15 @@ void sr_init(struct sr_instance* sr)
     /* Hilo para gestionar el timeout del caché ARP */
     pthread_create(&thread, &(sr->attr), sr_arpcache_timeout, sr);
 
+    /* Inicializa el subsistema RIP */
+    sr_rip_init(sr);
+
     /* Al encender su router, debe enviar una request RIP por cada una de sus 
        interfaces para poder poblar lo antes posible la tabla de enrutamiento.
        Se envia un Request RIP por cada interfaz.  
     */
     sr_rip_send_requests(sr);
+    
 
 } /* -- sr_init -- */
 
@@ -114,8 +115,8 @@ void sr_send_icmp_error_packet(uint8_t type,
         icmp_hdr->next_mtu = 0;
 
         /* Copiar cabecera IP + primeros 8 bytes del paquete original */    
-        unsigned int imcp_data_len = (len_ipPacket < 28) ? len_ipPacket : 28;
-        memcpy(icmp_hdr->data, ipPacket, imcp_data_len);    
+        unsigned int icmp_data_len = (len_ipPacket < 28) ? len_ipPacket : 28;
+        memcpy(icmp_hdr->data, ipPacket, icmp_data_len);    
 
         /* Checksum ICMP */
         icmp_hdr->icmp_sum = 0;
@@ -143,6 +144,12 @@ void sr_send_icmp_error_packet(uint8_t type,
             return;
         }
         struct sr_if *iface = sr_get_interface(sr, match->interface);
+        if (iface == NULL) {
+            printf("NO SE ENCONTRO INTERFAZ DE SALIDA PARA ESTA IP: ");
+            print_addr_ip_int(htonl(ipDst));
+            return;
+        }
+
         ip_hdr->ip_src = iface->ip;
 
         /* Checksum IP */
@@ -216,6 +223,11 @@ void sr_send_icmp_error_packet(uint8_t type,
             return;
         }
         struct sr_if *iface = sr_get_interface(sr, match->interface);
+        if (iface == NULL) {
+            printf("NO SE ENCONTRO INTERFAZ DE SALIDA PARA ESTA IP: ");
+            print_addr_ip_int(htonl(ipDst));
+            return;
+        }
         ip_hdr->ip_src = iface->ip;
 
         /* Checksum IP */
@@ -272,9 +284,14 @@ void sr_handle_ip_packet(struct sr_instance *sr,
     uint32_t dest_ip = ip_hdr->ip_dst;
     uint32_t src_ip = ip_hdr->ip_src;
     
-    printf("*** -> IP packet: ");
+
+
+    printf("*** -> IP packet: \n");
+    print_hdr_ip(packet + sizeof(sr_ethernet_hdr_t));
+    printf("*** Direccion de IP de origen ");
     print_addr_ip_int(htonl(src_ip));
-    printf(" -> ");
+    printf("\n");
+    printf("*** Direccion de IP de destino");
     print_addr_ip_int(htonl(dest_ip));
     printf("\n");
     
@@ -297,30 +314,34 @@ void sr_handle_ip_packet(struct sr_instance *sr,
         } else if (ip_hdr->ip_p == ip_protocol_udp) {
             sr_udp_hdr_t* udp_hdr = (sr_udp_hdr_t*)(packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t));    
             
-            if  (udp_hdr->dst_port == RIP_PORT) {
+            if  (ntohs(udp_hdr->dst_port) == RIP_PORT) {
                 unsigned int ip_off = sizeof(sr_ethernet_hdr_t);
                 unsigned int rip_off = ip_off + sizeof(sr_ip_hdr_t) + sizeof(sr_udp_hdr_t) ;
                 unsigned int rip_len = len - rip_off;
                 sr_handle_rip_packet(sr, packet, len, ip_off, rip_off, rip_len, interface);
+                return;
             } else {
-                printf("$$$ -> Received UDP/TCP for router, sending ICMP Port Unreachable\n");
+                printf("$$$ -> Received UDP for router, sending ICMP Port Unreachable\n");
                 uint8_t *ipPacket = (packet + sizeof(sr_ethernet_hdr_t));
-                sr_send_icmp_error_packet(3,3,sr,src_ip,ipPacket);            
+                sr_send_icmp_error_packet(3,3,sr,src_ip,ipPacket);
+                return;           
             }
        
         } else if (ip_hdr->ip_p == 0x0006) {
-            printf("$$$ -> Received UDP/TCP for router, sending ICMP Port Unreachable\n");
+            printf("$$$ -> Received TCP for router, sending ICMP Port Unreachable\n");
             uint8_t *ipPacket = (packet + sizeof(sr_ethernet_hdr_t));
             sr_send_icmp_error_packet(3,3,sr,src_ip,ipPacket);            
+            return;
         }
-
-    } else if (dest_ip == htonl(RIP_IP) && ip_hdr->ip_p == ip_protocol_udp) {
+        /*  */
+    } else if (ntohl(dest_ip) == RIP_IP && ip_hdr->ip_p == ip_protocol_udp) {
         sr_udp_hdr_t* udp_hdr = (sr_udp_hdr_t*)(packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t));
-        if (udp_hdr->dst_port == RIP_PORT) {
+        if (ntohs(udp_hdr->dst_port) == RIP_PORT) {
             unsigned int ip_off = sizeof(sr_ethernet_hdr_t);
             unsigned int rip_off = ip_off + sizeof(sr_ip_hdr_t) + sizeof(sr_udp_hdr_t) ;
             unsigned int rip_len = len - rip_off;
             sr_handle_rip_packet(sr, packet, len, ip_off, rip_off, rip_len, interface);
+            return;
         }    
     }    
 
@@ -355,7 +376,7 @@ void sr_handle_ip_packet(struct sr_instance *sr,
     /* Determinar la IP del siguiente salto */
     uint32_t next_hop_ip = (route->gw.s_addr == 0) ? dest_ip : route->gw.s_addr;
     
-    printf("*** -> Next hop IP: ");
+    printf("*** -> NEXT HOP IP: ");
     print_addr_ip_int(htonl(next_hop_ip));
     printf("\n");
     
@@ -363,6 +384,7 @@ void sr_handle_ip_packet(struct sr_instance *sr,
     struct sr_arpentry *entry = sr_arpcache_lookup(&sr->cache, next_hop_ip);
     
     if (entry) {
+        
         printf("*** -> ARP entry found, forwarding packet\n");
         
         /* Actualizar cabezal Ethernet */
@@ -370,6 +392,13 @@ void sr_handle_ip_packet(struct sr_instance *sr,
         
         /* Obtener la interfaz de salida */
         struct sr_if *out_iface = sr_get_interface(sr, route->interface);
+        
+        if (out_iface == NULL) {
+            printf("NO SE ENCONTRO INTERFAZ DE SALIDA PARA ESTA IP: ");
+            print_addr_ip_int(htonl(dest_ip));
+            return;
+        }
+
         if (out_iface) {
             memcpy(eHdr->ether_shost, out_iface->addr, ETHER_ADDR_LEN);
             sr_send_packet(sr, packet, len, route->interface);
@@ -441,6 +470,7 @@ void sr_handle_arp_packet(struct sr_instance *sr,
 
         /* Verificar si la solicitud es para una de nuestras interfaces */
         struct sr_if *iface = sr_get_interface_given_ip(sr, arpHdr->ar_tip);
+
         if (iface) {
             /* La solicitud es para nuestra dirección MAC, enviar una respuesta ARP */
             printf("*** -> Solicitud ARP para nuestra IP %s, enviando respuesta.\n", inet_ntoa(*(struct in_addr *)&arpHdr->ar_tip));
@@ -485,8 +515,15 @@ void sr_handle_arp_packet(struct sr_instance *sr,
         /* Insertar el mapeo IP->MAC en la caché ARP */
         struct sr_arpreq *req = sr_arpcache_insert(&sr->cache, arpHdr->ar_sha, arpHdr->ar_sip);
         if (req) {
+            
             /* Obtener la interfaz por la que llegó el paquete */
             struct sr_if *iface = sr_get_interface(sr, interface);
+            if (iface == NULL) {
+                //printf("NO SE ENCONTRO INTERFAZ DE SALIDA PARA ESTA IP: ");
+                //print_addr_ip_int(htonl(arpHdr->ar_sip));
+                return;
+            }
+
             if (iface) {
                 /* Enviar todos los paquetes pendientes usando la función auxiliar */
                 sr_arp_reply_send_pending_packets(sr, req, arpHdr->ar_sha, iface->addr, iface);
