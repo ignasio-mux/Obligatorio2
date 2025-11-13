@@ -492,95 +492,20 @@ void* sr_rip_send_requests(void* arg) {
 void* sr_rip_periodic_advertisement(void* arg) {
     struct sr_instance* sr = arg;
 
-    // Esperar a que las interfaces estén configuradas
-    int wait_count = 0;
-    bool all_interfaces_ready = false;
-    while (wait_count < 50 && !all_interfaces_ready) {
-        if (sr->if_list == NULL) {
-            sleep(1);
-            wait_count++;
-            continue;
-        }
-        
-        // Verificar que todas las interfaces tengan IP y máscara configuradas
-        all_interfaces_ready = true;
-        struct sr_if* if_check = sr->if_list;
-        while (if_check != NULL) {
-            uint32_t mask_val = if_check->mask;
-            uint32_t mask_nbo = htonl(mask_val);  /* Convertir a network byte order para verificación */
-            bool mask_valid = (mask_val != 0) && 
-                              ((mask_nbo >= 0xff000000) ||  /* /8 o más específica en NBO */
-                               (mask_nbo == 0xffff0000) ||  /* /16 en NBO */
-                               (mask_nbo == 0xffffff00) ||  /* /24 en NBO */
-                               (mask_nbo == 0xffffffff) ||  /* /32 en NBO */
-                               (mask_val == 0x00ffffff) ||  /* /24 en host byte order (little-endian) */
-                               (mask_val == 0x0000ffff) ||  /* /16 en host byte order */
-                               (mask_val == 0x000000ff));  /* /8 en host byte order */
-            
-            if (if_check->ip == 0 || !mask_valid) {
-                all_interfaces_ready = false;
-                break;
-            }
-            if_check = if_check->next;
-        }
-        
-        if (!all_interfaces_ready) {
-            sleep(1);
-            wait_count++;
-        }
-    }
-   
+    sleep(2); // Esperar a que se inicialice todo
+    
     // Agregar las rutas directamente conectadas
     /************************************************************************************/
     pthread_mutex_lock(&rip_metadata_lock);
     struct sr_if* int_temp = sr->if_list;
-    int count = 0;
     while(int_temp != NULL)
     {
-        /* Verificar que la interfaz tenga IP y máscara válidas */
-        /* Las máscaras pueden estar en network byte order o host byte order */
-        /* Verificar ambos casos: network byte order y host byte order (little-endian) */
-        uint32_t mask_val = int_temp->mask;
-        uint32_t mask_nbo = htonl(mask_val);  /* Convertir a network byte order para verificación */
-        bool mask_valid = (mask_val != 0) && 
-                          ((mask_nbo >= 0xff000000) ||  /* /8 o más específica en NBO */
-                           (mask_nbo == 0xffff0000) ||  /* /16 en NBO */
-                           (mask_nbo == 0xffffff00) ||  /* /24 en NBO */
-                           (mask_nbo == 0xffffffff) ||  /* /32 en NBO */
-                           (mask_val == 0x00ffffff) ||  /* /24 en host byte order (little-endian) */
-                           (mask_val == 0x0000ffff) ||  /* /16 en host byte order */
-                           (mask_val == 0x000000ff));  /* /8 en host byte order */
-        
-        if (int_temp->ip == 0 || !mask_valid) {
-            int_temp = int_temp->next;
-            continue;
-        }
-        
         struct in_addr ip;
         ip.s_addr = int_temp->ip;
         struct in_addr gw;
         gw.s_addr = 0x00000000;
         struct in_addr mask;
-        /* Las máscaras pueden estar en host byte order (little-endian) o network byte order */
-        /* 0x00ffffff en little-endian = 255.255.255.0 = 0xffffff00 en big-endian */
-        uint32_t mask_raw = int_temp->mask;
-        /* Construir la máscara correctamente en network byte order usando inet_addr */
-        if (mask_raw == 0x00ffffff) {
-            /* Máscara /24: 255.255.255.0 */
-            mask.s_addr = inet_addr("255.255.255.0");
-        } else if (mask_raw == 0x0000ffff) {
-            /* Máscara /16: 255.255.0.0 */
-            mask.s_addr = inet_addr("255.255.0.0");
-        } else if (mask_raw == 0x000000ff) {
-            /* Máscara /8: 255.0.0.0 */
-            mask.s_addr = inet_addr("255.0.0.0");
-        } else if (mask_raw == 0xffffff00 || mask_raw == 0xffff0000 || mask_raw == 0xff000000) {
-            /* Ya está en network byte order, usar directamente */
-            mask.s_addr = mask_raw;
-        } else {
-            /* Intentar convertir con htonl por si acaso */
-            mask.s_addr = htonl(mask_raw);
-        }
+        mask.s_addr =  int_temp->mask;
         struct in_addr network;
         network.s_addr = ip.s_addr & mask.s_addr;
         uint8_t metric = int_temp->cost ? int_temp->cost : 1;
@@ -589,6 +514,8 @@ void* sr_rip_periodic_advertisement(void* arg) {
         if (it->dest.s_addr == network.s_addr && it->mask.s_addr == mask.s_addr)
             sr_del_rt_entry(&sr->routing_table, it);
         }
+        Debug("-> RIP: Adding the directly connected network [%s, ", inet_ntoa(network));
+        Debug("%s] to the routing table\n", inet_ntoa(mask));
         sr_add_rt_entry(sr,
                         network,
                         gw,
@@ -600,42 +527,39 @@ void* sr_rip_periodic_advertisement(void* arg) {
                         time(NULL),
                         1,
                         0);
-        count++;
         int_temp = int_temp->next;
     }
-   
+    
     pthread_mutex_unlock(&rip_metadata_lock);
+    Debug("\n-> RIP: Printing the forwarding table\n");
+    print_routing_table(sr);
     /************************************************************************************/
 
-
-    /*
+    /* 
         Espera inicial de RIP_ADVERT_INTERVAL_SEC antes del primer envío.
         A continuación entra en un bucle infinito que, cada RIP_ADVERT_INTERVAL_SEC segundos,
         recorre la lista de interfaces (sr->if_list) y envía una respuesta RIP por cada una,
         utilizando la dirección de multicast definida (RIP_IP).
         Esto implementa el envío periódico de rutas (anuncios no solicitados) en RIPv2.
     */
-   
-    // Espera inicial de RIP_ADVERT_INTERVAL_SEC antes del primer envío
+    
+    /* Espera inicial de RIP_ADVERT_INTERVAL_SEC antes del primer envío */
     sleep(RIP_ADVERT_INTERVAL_SEC);
-   
-    // Bucle infinito para envíos periódicos
+    
+    /* Bucle infinito para envíos periódicos */
     while (1) {
-        // Recorrer todas las interfaces activas
+        /* Recorrer todas las interfaces activas */
         struct sr_if* interface = sr->if_list;
         while (interface != NULL) {
-            // Enviar respuesta RIP por multicast (RIP_IP) a través de esta interfaz
-            // RIP_IP está definido como 0xE0000009 en host byte order
-            // Convertir a network byte order para pasarlo a sr_rip_send_response
+            /* Enviar respuesta RIP por multicast (RIP_IP) a través de esta interfaz */
             sr_rip_send_response(sr, interface, htonl(RIP_IP));
-           
             interface = interface->next;
         }
-       
-        // Esperar RIP_ADVERT_INTERVAL_SEC segundos antes del siguiente envío
+        
+        /* Esperar RIP_ADVERT_INTERVAL_SEC segundos antes del siguiente envío */
         sleep(RIP_ADVERT_INTERVAL_SEC);
     }
-   
+    
     return NULL;
 }
 

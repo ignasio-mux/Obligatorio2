@@ -37,9 +37,6 @@ void sr_init(struct sr_instance* sr)
     /* Inicializa la caché y el hilo de limpieza de la caché */
     sr_arpcache_init(&(sr->cache));
 
-    /* Inicializa el subsistema RIP */
-    sr_rip_init(sr);
-
     /* Inicializa los atributos del hilo */
     pthread_attr_init(&(sr->attr));
     pthread_attr_setdetachstate(&(sr->attr), PTHREAD_CREATE_JOINABLE);
@@ -49,12 +46,6 @@ void sr_init(struct sr_instance* sr)
 
     /* Hilo para gestionar el timeout del caché ARP */
     pthread_create(&thread, &(sr->attr), sr_arpcache_timeout, sr);
-
-    /* Al encender su router, debe enviar una request RIP por cada una de sus 
-       interfaces para poder poblar lo antes posible la tabla de enrutamiento.
-       Se envia un Request RIP por cada interfaz.  
-    */
-    sr_rip_send_requests(sr);
 
 } /* -- sr_init -- */
 

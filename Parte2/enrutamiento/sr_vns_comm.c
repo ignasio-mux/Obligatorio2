@@ -40,6 +40,7 @@
 #include "sr_router.h"
 #include "sr_if.h"
 #include "sr_protocol.h"
+#include "sr_rip.h"
 
 #include "sha1.h"
 #include "vnscommand.h"
@@ -229,6 +230,13 @@ int sr_handle_hwinfo(struct sr_instance* sr, c_hwinfo* hwinfo)
 
     printf("Router interfaces:\n");
     sr_print_if_list(sr);
+
+    /* Inicializar RIP después de que se hayan cargado las interfaces */
+    static int rip_initialized = 0;
+    if (!rip_initialized) {
+        sr_rip_init(sr);
+        rip_initialized = 1;
+    }
 
     return num_entries;
 } /* -- sr_handle_hwinfo -- */
