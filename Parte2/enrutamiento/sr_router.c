@@ -59,20 +59,6 @@ void sr_init(struct sr_instance* sr)
 
 } /* -- sr_init -- */
 
-/* Verifica si una IP pertenece a alguna de nuestras interfaces */
-int is_packet_for_me(struct sr_instance *sr, uint32_t ip) {
-    struct sr_if *iface = sr->if_list;
-    
-    while (iface) {
-        if (iface->ip == ip) {
-            return 1;
-        }
-        iface = iface->next;
-    }
-    
-    return 0;
-}
-
 /* Declaración forward */
 void sr_arp_reply_send_pending_packets(struct sr_instance *sr,
                                         struct sr_arpreq *arpReq,
@@ -296,7 +282,7 @@ void sr_handle_ip_packet(struct sr_instance *sr,
     printf("\n");
     
     /* Verificar si el paquete es para una de nuestras interfaces */
-    if (is_packet_for_me(sr, dest_ip)) {
+    if (sr_get_interface_given_ip(sr, dest_ip)) {
         printf("*** -> Packet is for us\n");
         
         /* Verificar si es un ICMP echo request */

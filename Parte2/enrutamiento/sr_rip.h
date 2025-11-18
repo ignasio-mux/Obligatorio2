@@ -23,7 +23,6 @@
 #define RIP_TIMEOUT_SEC 60
 #define RIP_GARBAGE_COLLECTION_SEC 40
 #define RIP_MAX_ENTRIES 25  /* Máximo de rutas en un mensaje RIP response */
-//#define ENABLE_SPLIT_HORIZON_POISONED_REVERSE 1  /* 1 para habilitar, 0 para deshabilitar split horizon con poisoned reverse */
 
 struct sr_rip_subsys
 {

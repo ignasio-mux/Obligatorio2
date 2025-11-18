@@ -56,7 +56,6 @@ int sr_rip_validate_packet(sr_rip_packet_t* packet, unsigned int len) {
 
     return 1;
 }
-
 int sr_rip_update_route(struct sr_instance* sr,
                         const struct sr_rip_entry_t* rte,
                         uint32_t src_ip,
@@ -133,11 +132,14 @@ int sr_rip_update_route(struct sr_instance* sr,
         entry_in_rt->learned_from = src_ip;
         memcpy(entry_in_rt->interface, in_ifname, sr_IFACE_NAMELEN);
         entry_in_rt->last_updated = now;
+        /* Cambios */
+        entry_in_rt->valid = 1;
+        entry_in_rt->garbage_collection_time = 0;
         return 1;
     
     /* Si la entrada fue aprendida del mismo vecino:
     Actualiza métrica/gateway/timestamps si cambian; si no, solo refresca el timestamp */
-    }else {
+    } else {
         if (entry_in_rt->learned_from == src_ip) {
             if (entry_in_rt->metric != nuevo_costo) {
                 entry_in_rt->metric = nuevo_costo;
@@ -253,7 +255,7 @@ void sr_handle_rip_packet(struct sr_instance* sr,
             //sr_print_routing_table(sr);
             print_routing_table(sr);
         
-        } else{ 
+        } else { 
             printf("No se realizaron cambios\n");
             print_routing_table(sr);
         }
@@ -308,9 +310,11 @@ void sr_rip_send_response(struct sr_instance* sr, struct sr_if* interface, uint3
         /* Es unicast - necesitamos ARP lookup */
         arp_entry = sr_arpcache_lookup(&sr->cache, ipDst);
         if (!arp_entry) {
-            /* No hay entrada ARP - liberar y retornar */
-            free(packet);
-            return;
+           /* struct sr_arpreq *req = sr_arpcache_queuereq(&sr->cache, next_hop_ip, ethernet_trama, total_len, iface->name);
+            handle_arpreq(sr, req); */
+              
+            free(packet); 
+            return; 
         }
         memcpy(dst_mac, arp_entry->mac, ETHER_ADDR_LEN);
         free(arp_entry);
@@ -365,14 +369,15 @@ void sr_rip_send_response(struct sr_instance* sr, struct sr_if* interface, uint3
             metric = INFINITY;
         } else if (rt->learned_from != 0) {
             /* Ruta aprendida de un vecino - verificar split horizon con poisoned reverse */
-            #ifndef ENABLE_SPLIT_HORIZON_POISONED_REVERSE
+            #ifndef DISABLE_SPLIT_HORIZON_POISONED_REVERSE
             struct sr_if* learned_if = sr_get_interface(sr, rt->interface);
             if (learned_if == NULL) {
                 printf("NO SE ENCONTRO INTERFAZ DE SALIDA PARA ESTA IP: ");
                 print_addr_ip_int(htonl(ipDst));
+                pthread_mutex_unlock(&rip_metadata_lock);
                 return;
             }
-            if (learned_if && strcmp(learned_if->name, interface->name) == 0) {
+            if (strcmp(learned_if->name, interface->name) == 0) {
                 /* Split horizon con poisoned reverse: anunciar con métrica INFINITY */
                 metric = INFINITY;
             }
