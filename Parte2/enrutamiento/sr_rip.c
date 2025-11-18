@@ -310,9 +310,6 @@ void sr_rip_send_response(struct sr_instance* sr, struct sr_if* interface, uint3
         /* Es unicast - necesitamos ARP lookup */
         arp_entry = sr_arpcache_lookup(&sr->cache, ipDst);
         if (!arp_entry) {
-           /* struct sr_arpreq *req = sr_arpcache_queuereq(&sr->cache, next_hop_ip, ethernet_trama, total_len, iface->name);
-            handle_arpreq(sr, req); */
-              
             free(packet); 
             return; 
         }
